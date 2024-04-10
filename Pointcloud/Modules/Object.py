@@ -1,38 +1,75 @@
+#https://stackoverflow.com/questions/33533148/how-do-i-type-hint-a-method-with-the-type-of-the-enclosing-class
+from __future__ import annotations
+
+from .Utils import TorchUtils
+
 from copy import deepcopy
-from igl import barycenter as igl_barycenter,\
-    doublearea as igl_doublearea,\
-    read_obj as igl_read_obj,\
-    vertex_triangle_adjacency as igl_vertex_triangle_adjacency,\
-    per_vertex_normals as igl_per_vertex_normals,\
-    per_face_normals as igl_per_face_normals,\
-    triangle_triangle_adjacency as igl_triangle_triangle_adjacency,\
+from igl import (
+    barycenter as igl_barycenter,
+    doublearea as igl_doublearea,
+    read_obj as igl_read_obj,
+    vertex_triangle_adjacency as igl_vertex_triangle_adjacency,
+    per_vertex_normals as igl_per_vertex_normals,
+    per_face_normals as igl_per_face_normals,
+    triangle_triangle_adjacency as igl_triangle_triangle_adjacency,
     vertex_triangle_adjacency as igl_vertex_triangle_adjacency
-from numpy import any as np_any,\
-    arange as np_arange,\
-    argwhere as np_argwhere,\
-    array as np_array,\
-    c_ as np_c_,\
-    cross as np_cross,\
-    logical_not as np_logical_not,\
-    nan_to_num as np_nan_to_num,\
-    ones as np_ones,\
-    repeat as np_repeat,\
-    sort as np_sort,\
-    sum as np_sum,\
-    vstack as np_vstack,\
-    unique as np_unique,\
+)
+from numpy import (
+    arange as np_arange,
+    array as np_array,
+    c_ as np_c_,
+    nan_to_num as np_nan_to_num,
+    repeat as np_repeat,
+    sum as np_sum,
+    vstack as np_vstack,
     zeros as np_zeros
+)
 from pathlib import Path
+from pywavefront import Wavefront as pyWavefront
 #https://github.com/nmwsharp/robust-laplacians-py
 from robust_laplacian import point_cloud_laplacian
 from scipy.spatial import KDTree as scipy_spatial_KDTree
-from sklearn.preprocessing import normalize as sklearn_preprocessing_normalize
-from torch import arange as torch_arange,\
-    from_numpy as torch_from_numpy,\
-    long as torch_long,\
-    stack as torch_stack
+from torch import (
+    from_numpy as torch_from_numpy,
+    long as torch_long,
+    tensor as torch_tensor,
+    Tensor as torch_Tensor
+)
 from torch_geometric.data import Data as tg_data_Data
-from warnings import warn
+
+class Pointcloud:
+
+    def __init__(self, v: torch_Tensor, n: torch_Tensor = None) -> None:
+        assert v.is_floating_point()
+        assert v.dim() == 2
+        assert v.size(1) == 3
+        if n is not None:
+            assert n.is_floating_point()
+            assert n.dim() == 2
+            assert n.size(1) == 3
+            assert v.size(0) == n.size(0)
+
+        self.v = v
+        self.n = n
+
+    @classmethod
+    def loadObj(cls, file_path: str) -> Pointcloud:
+        r"""
+        We only implement loading, since saving doesn't work with this library...
+        """
+        path = Path(file_path)
+        assert path.is_file()
+        assert path.suffix == ".obj"
+
+        v, _, n, fv, _, fn = igl_read_obj(file_path)
+        v, n, fv, fn = torch_tensor(v), torch_tensor(n), torch_tensor(fv, dtype=torch_long), torch_tensor(fn, dtype=torch_long)
+        if n.size(0) > 0 and fn.size(0) > 0:
+            return Pointcloud(v, TorchUtils.face2vertexNormals(v, fv, n, fn))
+        else:
+            return Pointcloud(v)
+    
+    def hasNormals(self):
+        return self.n is not None
 
 '''
     This file contains classes that represent .obj files.
@@ -40,7 +77,7 @@ from warnings import warn
     it extends the pointcloud (and sometimes overrides functions)
 '''
 
-class Object:
+class FileObject:
 
     '''
         Init stuff
@@ -62,7 +99,7 @@ class Object:
             self.gt = data[0]
             return data
 
-class Pointcloud(Object):
+class FilePointcloud(FileObject):
 
     DEFAULT_NEIGHBOURHOOD_MODE = 1
 
@@ -103,7 +140,7 @@ class Pointcloud(Object):
 
     def calculateNormals(self):
         self.vn = np_nan_to_num(igl_per_vertex_normals(self.v, self.f), copy=False, nan=0)
-        self.fn = igl_per_face_normals(self.v, self.f, Mesh.DEGENERATE_NORMAL_PLACEHOLDER)
+        self.fn = igl_per_face_normals(self.v, self.f, FileMesh.DEGENERATE_NORMAL_PLACEHOLDER)
 
     def calculateAreas(self):
         if self.vta is None:
@@ -141,7 +178,7 @@ class Pointcloud(Object):
             KNN_K_HARDCODED = 12
             # k=12, because the mean + var degree of the armadillo & fandisk are 8 & 10 respectively.
             # This means that knn for k=12 will cover most of the details that the robust laplacian will catch as well!
-            return HelperFunctions.toEdgeTensor(self.kdtree.query(self.v, k=KNN_K_HARDCODED+1)[1][:, 1:])
+            return TorchUtils.toEdgeTensor(self.kdtree.query(self.v, k=KNN_K_HARDCODED+1)[1][:, 1:])
         elif mode == 1:
             L, _ = point_cloud_laplacian(self.v)
             Lcoo = L.tocoo()
@@ -152,7 +189,7 @@ class Pointcloud(Object):
     def toGraph(self, mode=DEFAULT_NEIGHBOURHOOD_MODE):
         return tg_data_Data(edge_index=self.toEdges(mode=mode), pos=self.toNodes(), n=torch_from_numpy(self.getNormals()), a=torch_from_numpy(self.getAreas()))
 
-class Mesh(Pointcloud):
+class FileMesh(FilePointcloud):
 
     DEGENERATE_NORMAL_PLACEHOLDER = np_zeros(3)
 
@@ -210,93 +247,3 @@ class Mesh(Pointcloud):
     
     def toGraph(self):
         return tg_data_Data(edge_index=self.toEdges(), pos=self.toNodes(), n=torch_from_numpy(self.getNormals()), a=torch_from_numpy(self.getAreas()))
-
-class HelperFunctions:
-
-    DEGENERATE_NORMAL_PLACEHOLDER = np_zeros(3)
-
-    @classmethod
-    def calculateVertexNormals(cls, v, f):
-        return np_nan_to_num(igl_per_vertex_normals(v, f), copy=False, nan=0)
-
-    @classmethod
-    def calculateFaceNormals(cls, v, f):
-        return igl_per_face_normals(v, f, cls.DEGENERATE_NORMAL_PLACEHOLDER)
-    
-    @classmethod
-    # https://stackoverflow.com/questions/47125697/concatenate-range-arrays-given-start-stop-numbers-in-a-vectorized-way-numpy
-    # starts: 1D numpy array of indices of size n representing the starts of the ranges.
-    # ends: 1D numpy array of indices of size n representing the ends of the ranges.
-    # return: 1D numpy array of indices with indices that are within one of the given ranges.
-    # WARNING: The list can be unsorted and contain duplicates.
-    def rangeBoundariesToIndices(cls, starts, ends):
-        l = ends - starts
-        nonsense_ids = l <= 0
-        if np_any(nonsense_ids):
-            # Lengths of ranges that are zero are nonsense and should be ignored.
-            # Ranges with a negative length have the start and end reversed.
-            #   This should be fixed before calling this function for efficiency.
-            warn(f"Nonsensible ranges are given and will be ignored! (IDs: {np_arange(len(nonsense_ids))[nonsense_ids]}, Range lengths: {l[nonsense_ids]})")
-            sensible_ids = np_logical_not(nonsense_ids)
-            starts = starts[sensible_ids]
-            ends = ends[sensible_ids]
-            l = ends - starts
-        clens = l.cumsum()
-        ids = np_ones(clens[-1],dtype=int)
-        ids[0] = starts[0]
-        ids[clens[:-1]] = starts[1:] - ends[:-1] + 1
-        return ids.cumsum()
-    
-    @classmethod
-    def toEdgeTensor(cls, output):
-        col = torch_from_numpy(output).to(torch_long)
-        k = col.size(1)
-        row = torch_arange(col.size(0), dtype=torch_long).view(-1, 1).repeat(1, k)
-        return torch_stack([row.reshape(-1), col.reshape(-1)], dim=0).long()
-    
-    '''
-        DEPRECATED DEFINITIONS
-    '''
-
-    # v: (num_vertices, num_axes) -> Euclidian position
-    # f: (num_faces, num_corners) -> vertex_index
-    # n: (num_faces, num_axes) -> Euclidian position
-    @classmethod
-    def vertexNormalsFromFaceNormals(cls, v, f, n):
-        warn("This method is slow and therefore deprecated! Use igl.per_vertex_normals instead!")
-        # vta: ((3*num_faces,), (num_vertices+1)) -> (neighbor_face_index, cumulative_vertex_degree)
-        vta = igl_vertex_triangle_adjacency(f, len(v))
-        # vi: (num_vertices,) -> all vertex indices
-        vi = np_arange(len(v))
-        # v_degree: (num_vertices,) -> vertex_degree
-        v_degree = vta[1][vi+1] - vta[1][vi]
-        # unique_degrees: (num_unique_vertex_degrees,) -> vertex_degree
-        # vi_di: (num_vertices,) -> unique_vertex_degree_index
-        unique_degrees, vi_di = np_unique(v_degree, return_inverse=True)
-        vertex_normals = np_zeros((len(v), 3))
-        # di: degree_i
-        # degree: vertex_degree
-        for di, unique_degree in enumerate(unique_degrees):
-            # v_with_degree: (num_vertices_with_degree,) -> vertex_index
-            v_with_degree = np_argwhere(vi_di == di).reshape(-1)
-            # vta_to_index: (num_faces_of_vertices_with_degree,) -> vta_index
-            vta_to_index = cls.rangeBoundariesToIndices(vta[1][v_with_degree].reshape(-1), vta[1][v_with_degree+1].reshape(-1))
-            # faces_of_v_with_degree: (num_vertices_with_degree, unique_degree) -> face_index
-            faces_of_v_with_degree = vta[0][vta_to_index].reshape(-1, unique_degree)
-            # normals_of_faces: (num_vertices_with_degree, unique_degree, num_axes) -> Euclidian position
-            normals_of_faces = n[faces_of_v_with_degree]
-            # normalized_summed_normals: (num_vertices_with_degree, num_axes) -> Euclidian position
-            normalized_summed_normals = sklearn_preprocessing_normalize(normals_of_faces.sum(axis=1))
-            vertex_normals[v_with_degree] = normalized_summed_normals
-        return vertex_normals
-    
-    # v: (num_vertices, num_axes) -> Euclidian position
-    # f: (num_faces, num_corners) -> vertex_index
-    @classmethod
-    def normalsOfFaces(cls, f, v):
-        warn("This method is slow and therefore deprecated! Use igl.per_face_normals instead!")
-        # fv: (num_faces, num_corners, num_axes) -> Euclidian position
-        fv = v[f]
-        # crosses: (num_faces, num_axes) -> Euclidian position
-        normals = sklearn_preprocessing_normalize(np_cross(fv[:, 1, :] - fv[:, 0, :], fv[:, 2, :] - fv[:, 1, :]))
-        return normals

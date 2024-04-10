@@ -1,4 +1,4 @@
-from .Object import Pointcloud
+from .Object import FilePointcloud
 
 from copy import deepcopy
 from igl import per_vertex_normals as igl_per_vertex_normals, read_obj as igl_read_obj, write_obj as igl_write_obj
@@ -16,7 +16,7 @@ class Noise:
     NOISE_ID = 0
 
     def __init__(self, pointcloud):
-        if not isinstance(pointcloud, Pointcloud):
+        if not isinstance(pointcloud, FilePointcloud):
             raise ValueError(f"pointcloud does not have the type Pointcloud.\nPointcloud type: {type(pointcloud)}")
 
         self.object = pointcloud
