@@ -1,6 +1,8 @@
 #https://stackoverflow.com/questions/33533148/how-do-i-type-hint-a-method-with-the-type-of-the-enclosing-class
 from __future__ import annotations
 
+from isort import file
+
 from .Utils import TorchUtils
 
 from copy import deepcopy
@@ -30,6 +32,7 @@ from pywavefront import Wavefront as pyWavefront
 from robust_laplacian import point_cloud_laplacian
 from scipy.spatial import KDTree as scipy_spatial_KDTree
 from torch import (
+    float as torch_float,
     from_numpy as torch_from_numpy,
     long as torch_long,
     tensor as torch_tensor,
@@ -52,6 +55,19 @@ class Pointcloud:
         self.v = v
         self.n = n
 
+    def saveObj(self, file_path: str) -> None:
+        f = open(file_path, "x")
+        f.write("# File made by Ruben Band\n")
+        for i in self.v:
+            line = "v " + " ".join([str(x) for x in i.tolist()]) + "\n"
+            f.write(line)
+        if self.n is not None:
+            for i in self.n:
+                line = "vn " + " ".join([str(x) for x in i.tolist()]) + "\n"
+                f.write(line)
+        f.close()
+        self.file_path = file_path
+
     @classmethod
     def loadObj(cls, file_path: str) -> Pointcloud:
         r"""
@@ -62,14 +78,21 @@ class Pointcloud:
         assert path.suffix == ".obj"
 
         v, _, n, fv, _, fn = igl_read_obj(file_path)
-        v, n, fv, fn = torch_tensor(v), torch_tensor(n), torch_tensor(fv, dtype=torch_long), torch_tensor(fn, dtype=torch_long)
+        v, n, fv, fn = torch_tensor(v, dtype=torch_float), torch_tensor(n, dtype=torch_float), torch_tensor(fv, dtype=torch_long), torch_tensor(fn, dtype=torch_long)
         if n.size(0) > 0 and fn.size(0) > 0:
-            return Pointcloud(v, TorchUtils.face2vertexNormals(v, fv, n, fn))
+            pointcloud = Pointcloud(v, TorchUtils.face2vertexNormals(v, fv, n, fn))
+        elif n.size(0) > 0 and v.size(0) == n.size(0):
+            pointcloud = Pointcloud(v, n) 
         else:
-            return Pointcloud(v)
+            pointcloud = Pointcloud(v)
+        pointcloud.file_path = file_path
+        return pointcloud
     
     def hasNormals(self):
         return self.n is not None
+    
+    def hasFilePath(self):
+        return self.file_path is not None
 
 '''
     This file contains classes that represent .obj files.

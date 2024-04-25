@@ -1,14 +1,17 @@
+from Pointcloud.Modules.Utils import GeneralUtils
 from .Noise import Noise
-from .Object import FilePointcloud
+from .Object import Pointcloud
 from .Preprocessor import Preprocessor
 
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2 as shutil_copy2
+from tqdm import tqdm
 from torch import (
     load as torch_load,
     randperm as torch_randperm,
     save as torch_save,
+    Tensor as torch_Tensor
 )
 from torch_geometric.data import (
     Batch as tg_data_Batch,
@@ -18,7 +21,10 @@ from torch_geometric.data import (
 from torch_geometric.loader import (
     DataLoader as tg_loader_DataLoader
 )
-from typing import Union as typing_Union
+from typing import (
+    Union as typing_Union,
+    Tuple as typing_Tuple
+)
 from warnings import warn as warnings_warn
 
 @dataclass
@@ -40,17 +46,18 @@ class FileDataset(tg_data_InMemoryDataset):
     FEATURE = "_feature"
     NON_FEATURE = "_nonfeature"
 
-    def __init__(self, root: str, objects: list[FilePointcloud] = None, noise_levels: NoiseLevels=DEFAULT_NOISE_LEVELS, split: typing_Union[float, float, float]=DEFAULT_SPLIT, transform=None, pre_transform=None):
-        if objects is not None and len(objects) == 0:
-            raise ValueError("Cannot create an empty dataset.")
-        if not sum(split) == 1:
-            raise ValueError("Sum of train, validation and test splits should be 1.")
+    def __init__(self, root: str,
+                pre_add_objects: list[Pointcloud] = None,
+                noise_levels: NoiseLevels=DEFAULT_NOISE_LEVELS,
+                split: typing_Tuple[float, float, float] = DEFAULT_SPLIT,
+                split_name: str = None,
+                transform=None,
+                pre_transform=None):
         if transform is not None or pre_transform is not None:
             warnings_warn("transform or pre_transform given. Methods for these are not implemented!")
         
-        self.objects = objects
+        self.objects = pre_add_objects
         self.noise_levels = noise_levels
-        self.split = split
         super(FileDataset, self).__init__(root, transform, pre_transform)
         _processed_paths = self.processed_paths
         feature_graphs = []
@@ -63,9 +70,29 @@ class FileDataset(tg_data_InMemoryDataset):
             else:
                 feature_graphs += graph_list
         self.data = (tg_data_Batch.from_data_list(feature_graphs), tg_data_Batch.from_data_list(nonfeature_graphs))
-        # TODO create train/val/test split from group splitted data
-        data0 = self.data[0]
-        data1 = self.data[1]
+        try:
+            self.loadSplitIndices(split_name)
+        except:
+            self.generateSplitIndices(split=split)
+            self.saveSplitIndices(split_name)
+        self.createDatasets()
+    
+    def assertSplitIndices(self):
+        if not hasattr(self, "splitIndices"):
+            raise ValueError("splitIndices not found. A split has not been created yet.")
+
+    def getSplit(self):
+        self.assertSplitIndices()
+        return tuple(self.splitIndices.size())
+
+    def generateSplitIndices(self, split: typing_Tuple[float, float, float]=DEFAULT_SPLIT):
+        if not sum(split) == 1:
+            raise ValueError("Sum of train, validation and test splits should be 1.")
+        
+        _data = self._data
+        data0 = _data[0]
+        data1 = _data[1]
+        _device = data0[0].x.device
         num_features = len(data0)
         num_nonfeatures = len(data1)
         split0 = split[0]
@@ -73,25 +100,49 @@ class FileDataset(tg_data_InMemoryDataset):
         features_split0 = int(num_features * split0)
         features_split1 = features_split0 + int(num_features * split1)
         nonfeatures_split0 = int(num_nonfeatures * split0)
-        nonfeatures_split1 = features_split0 + int(num_nonfeatures * split1)
-        features_perm = torch_randperm(num_features)
-        nonfeatures_perm = torch_randperm(num_nonfeatures)
+        nonfeatures_split1 = nonfeatures_split0 + int(num_nonfeatures * split1)
+        features_perm = torch_randperm(num_features, device=_device)
+        nonfeatures_perm = torch_randperm(num_nonfeatures, device=_device)
         features_train_indices = features_perm[:features_split0]
         features_val_indices = features_perm[features_split0:features_split1]
         features_test_indices = features_perm[features_split1:]
         nonfeatures_train_indices = nonfeatures_perm[:nonfeatures_split0]
         nonfeatures_val_indices = nonfeatures_perm[nonfeatures_split0:nonfeatures_split1]
         nonfeatures_test_indices = nonfeatures_perm[nonfeatures_split1:]
-        self.train_ds = tg_data_Batch.from_data_list(data0[features_train_indices] + data1[nonfeatures_train_indices])
-        self.val_ds = tg_data_Batch.from_data_list(data0[features_val_indices] + data1[nonfeatures_val_indices])
-        self.test_ds = tg_data_Batch.from_data_list(data0[features_test_indices] + data1[nonfeatures_test_indices])
+        self.splitIndices = (features_train_indices, features_val_indices, features_test_indices, nonfeatures_train_indices, nonfeatures_val_indices, nonfeatures_test_indices)
+    
+    def saveSplitIndices(self, name: str, overwrite: bool = False):
+        self.assertSplitIndices()
+        file_path = Path(self.processed_dir) / (name + ".split")
+        if not file_path.exists() or overwrite:
+            torch_save(self.splitIndices, file_path)
+        else:
+            raise ValueError("File already exists and overwrite is set to False.")
+        
+    def loadSplitIndices(self, name: str):
+        file_path = Path(self.processed_dir) / (name + ".split")
+        if file_path.exists():
+            self.splitIndices = torch_load(file_path)
+        else:
+            raise ValueError("Can't find split file")
+    
+    def createDatasets(self):
+        _data = self._data
+        data0 = _data[0]
+        data1 = _data[1]
+        _splitIndices = self.splitIndices
+        self.train_ds = tg_data_Batch.from_data_list(data0[_splitIndices[0]] + data1[_splitIndices[3]])
+        self.val_ds = tg_data_Batch.from_data_list(data0[_splitIndices[1]] + data1[_splitIndices[4]])
+        self.test_ds = tg_data_Batch.from_data_list(data0[_splitIndices[2]] + data1[_splitIndices[5]])
     
     @property
     def raw_file_names(self) -> list[str]:
-        if self.objects is None:
-            return [x.name for x in Path(self.raw_dir).glob("*.obj")]
-        else:
-            return [Path(x.file_path).name for x in self.objects]
+        files = [x.name for x in Path(self.raw_dir).glob("*.obj")]
+        if self.objects is not None:
+            files_from_objects = [Path(x.file_path).name for x in self.objects]
+            files += files_from_objects
+        return files
+
 
     @property
     def processed_file_names(self):
@@ -109,8 +160,9 @@ class FileDataset(tg_data_InMemoryDataset):
         return result
 
     def download(self):
-        for path in [x.file_path for x in self.objects]:
-            shutil_copy2(path, self.raw_dir)
+        if self.object is not None:
+            for pointcloud in self.objects:
+                pointcloud.saveObj(Path(self.raw_dir) + Path(pointcloud.file_path).name)
 
     def process(self):
         _raw_paths = self.raw_paths
@@ -119,9 +171,9 @@ class FileDataset(tg_data_InMemoryDataset):
         data_list = []
         for path in _raw_paths:
             _stem = Path(path).stem
-            pointcloud = FilePointcloud(path)
+            pointcloud = Pointcloud.loadObj(path)
             preprocessor = Preprocessor(pointcloud)
-            noise = Noise(pointcloud)
+            noise = Noise(preprocessor.graph)
             classes_file = _pdir / (_stem + self.CLASSES + self.EXTENSION)
             if not classes_file.exists():
                 classes = preprocessor.getClasses()
@@ -138,31 +190,30 @@ class FileDataset(tg_data_InMemoryDataset):
                 torch_randperm(feature_idx_n)[:group_sizes[0]],
                 torch_randperm(nonfeature_idx_n)[:group_sizes[1]],
             )
-            # print(f"Amount of nodes to be grouped: {groups.size(0)}\nAmount of features: {feature_idx_n}\nAmount of non-features: {nonfeature_idx.size(0)}\nAmount of indices returned: {indices.size(0)}")
-            for level in _nl.gaussian:
+            for level in tqdm(_nl.gaussian, desc=f"Preprocessing gaussian noise for {_stem}"):
                 for i in range(len(indices)):
                     group = self.FEATURE if i == 0 else self.NON_FEATURE
                     file_location = _pdir / (_stem + self.GAUSSIAN + str(level) + group + self.EXTENSION)
                     if not file_location.exists():
                         noise.generateNoise(level, 0, 0)
-                        data_list = preprocessor.getGraphs(indices[i])
+                        data_list = preprocessor.getPatches(indices[i])
                         store = tg_data_Batch.from_data_list(data_list)
                         torch_save(store, str(file_location))
-            for level in _nl.impulsive:
+            for level in tqdm(_nl.impulsive, desc=f"Preprocessing gaussian noise for {_stem}"):
                 for i in range(len(indices)):
                     group = self.FEATURE if i == 0 else self.NON_FEATURE
                     file_location = _pdir / (_stem + self.IMPULSIVE + str(level) + group + self.EXTENSION)
                     if not file_location.exists():
                         noise.generateNoise(level, 1, 0)
-                        data_list = preprocessor.getGraphs(indices[i])
+                        data_list = preprocessor.getPatches(indices[i])
                         store = tg_data_Batch.from_data_list(data_list)
                         torch_save(store, str(file_location))
     
     def len(self) -> int:
-        return len(self.data)
+        return len(self._data)
     
     def get(self, idx: int):
-        return self.data[idx]
+        return self._data[idx]
 
     def train_dataloader(self, batch_size, num_workers):
         return tg_loader_DataLoader(

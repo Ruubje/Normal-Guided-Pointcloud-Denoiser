@@ -1,10 +1,14 @@
+from . import Config as config
+
 from dataclasses import (
     dataclass
 )
 from torch import (
     cat as torch_cat,
     int64 as torch_int64,
+    ones as torch_ones,
     tensor as torch_tensor,
+    Tensor as torch_Tensor,
     zeros as torch_zeros
 )
 from torch.optim import Adam as torch_Adam
@@ -29,21 +33,29 @@ from torch_geometric.nn.pool import (
     global_max_pool as tg_global_max_pool
 )
 import pytorch_lightning as pl
-import torchmetrics
-import torchvision
+
+def custom_val_loss(input: torch_Tensor, target: torch_Tensor) -> torch_Tensor:
+    loss1 = (input + target).square().mean(dim=1, keepdim=True)
+    loss2 = (input - target).square().mean(dim=1, keepdim=True)
+    return torch_cat([loss1, loss2], dim=1).min(dim=1).values.mean(dim=0)
+
+def custom_cos_loss(input: torch_Tensor, target: torch_Tensor) -> torch_Tensor:
+    loss1 = (input * target).sum(dim=1, keepdim=True)
+    loss2 = (input * -target).sum(dim=1, keepdim=True)
+    return torch_cat([loss1, loss2], dim=1).min(dim=1).values.mean(dim=0)
 
 @dataclass
 class NetworkModelConfiguration():
-    k: int = 8
-    lr: float = 0.001
-    num_edgeconv: int = 3
-    num_dynamic_edgeconv: int = 3
-    num_prepool_linear: int = 1
-    number_postpool_linear_layers: int = 3
-    in_channels: int = 8
-    feature_channels: torch_tensor = torch_tensor([64, 64, 128, 256, 256, 256, 512, 256, 64], dtype=torch_int64)
-    out_channels: int = 3
-    dropout: float = 0.5
+    k: int = config.DYNAMIC_EDGECONV_K
+    lr: float = config.LEARNING_RATE
+    num_edgeconv: int = config.NUM_EDGECONV
+    num_dynamic_edgeconv: int = config.NUM_DYNAMIC_EDGECONV
+    num_prepool_linear: int = config.NUM_PREPOOL
+    number_postpool_linear_layers: int = config.NUM_POSTPOOL
+    in_channels: int = config.INPUT_SIZE
+    out_channels: int = config.OUTPUT_SIZE
+    feature_channels: torch_Tensor = torch_tensor(config.HIDDEN, dtype=torch_int64)
+    dropout: float = config.DROPOUT_RATE
 
     def __post_init__(self):
         sum_layers = self.number_postpool_linear_layers + self.num_dynamic_edgeconv + self.num_edgeconv + self.num_prepool_linear
@@ -127,10 +139,11 @@ class Patch2NormalModel(pl.LightningModule):
         ))
 
     def forward(self, x, edge_index, batch):
+        _device = x.device
         _config = self.config
         num_convs = _config.num_edgeconv + _config.num_dynamic_edgeconv
         pool_sizes = torch_cat([torch_zeros(1, dtype=torch_int64), _config.feature_channels[:num_convs].cumsum(dim=0)])
-        x_cat = torch_zeros(x.size(0), pool_sizes[-1])
+        x_cat = torch_zeros(x.size(0), pool_sizes[-1], device=_device)
         for i in range(_config.feature_channels.size(0)):
             if i < _config.num_edgeconv:
                 layer = getattr(self, f"layer{i}")
@@ -158,32 +171,59 @@ class Patch2NormalModel(pl.LightningModule):
         return lastLayer(x)
     
     def training_step(self, batch, batch_idx):
-        val_loss, cos_loss, normals, _y = self._common_step(batch, batch_idx)
+        val_loss, cos_loss, c_val_loss, normals, _y = self._common_step(batch, batch_idx)
+        batch_size = len(batch)
         self.log_dict(
             {
                 "train_val_loss": val_loss,
                 "train_cos_loss": cos_loss,
+                "train_custom_val_loss": c_val_loss
             },
             on_step=False,
             on_epoch=True,
             prog_bar=True,
+            batch_size=batch_size
         )
         # if batch_idx % 100 == 0:
         #     x = x[:8]
         #     grid = torchvision.utils.make_grid(x.view(-1, 1, 28, 28))
         #     self.logger.experiment.add_image("mnist_images", grid, self.global_step)
-        return {"loss": val_loss, "val_loss": val_loss, "cos_loss": cos_loss, "output": normals, "y": _y}
+        return {"loss": c_val_loss, "val_loss": val_loss, "cos_loss": cos_loss, "output": normals, "y": _y}
 
     def validation_step(self, batch, batch_idx):
-        val_loss, cos_loss, normals, y = self._common_step(batch, batch_idx)
-        self.log("val_val_loss", val_loss)
-        self.log("val_cos_loss", val_loss)
+        val_loss, cos_loss, c_val_loss, normals, y = self._common_step(batch, batch_idx)
+        batch_size = len(batch)
+        # self.log("val_val_loss", val_loss, batch_size=batch_size)
+        # self.log("val_cos_loss", cos_loss, batch_size=batch_size)
+        self.log_dict(
+            {
+                "val_val_loss": val_loss,
+                "val_cos_loss": cos_loss,
+                "val_custom_val_loss": c_val_loss
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size
+        )
         return val_loss
 
     def test_step(self, batch, batch_idx):
-        val_loss, cos_loss, normals, y = self._common_step(batch, batch_idx)
-        self.log("test_val_loss", val_loss)
-        self.log("test_cos_loss", val_loss)
+        val_loss, cos_loss, c_val_loss, normals, y = self._common_step(batch, batch_idx)
+        batch_size = len(batch)
+        # self.log("test_val_loss", val_loss, batch_size=batch_size)
+        # self.log("test_cos_loss", cos_loss, batch_size=batch_size)
+        self.log_dict(
+            {
+                "test_val_loss": val_loss,
+                "test_cos_loss": cos_loss,
+                "test_custom_val_loss": c_val_loss
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size
+        )
         return val_loss
 
     def _common_step(self, batch, batch_idx):
@@ -193,8 +233,9 @@ class Patch2NormalModel(pl.LightningModule):
         normals = self.forward(_x, _edge_index, _batch)
         _y = batch.y
         val_loss = torch_val_loss(normals, _y)
-        cos_loss = torch_cos_loss(normals, _y)
-        return val_loss, cos_loss, normals, _y
+        cos_loss = torch_cos_loss(normals, _y, torch_ones((_y.size(0),), device=_y.device))
+        c_val_loss = custom_val_loss(normals, _y)
+        return val_loss, cos_loss, c_val_loss, normals, _y
 
     def predict_step(self, batch, batch_idx):
         _x = batch.x
@@ -207,81 +248,79 @@ class Patch2NormalModel(pl.LightningModule):
     def configure_optimizers(self):
         return torch_Adam(self.parameters(), lr=self.config.lr)
 
+# class NN(pl.LightningModule):
+#     def __init__(self, input_size, num_classes, learning_rate):
+#         super().__init__()
+#         self.lr = learning_rate
+#         self.fc1 = nn.Linear(input_size, 50)
+#         self.fc2 = nn.Linear(50, num_classes)
+#         self.loss_fn = nn.CrossEntropyLoss()
+#         self.accuracy = torchmetrics.Accuracy(
+#             task="multiclass", num_classes=num_classes
+#         )
+#         self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes)
 
+#     def forward(self, x):
+#         x = self.fc1(x)
+#         x = F.relu(x)
+#         x = self.fc2(x)
+#         return x
 
-class NN(pl.LightningModule):
-    def __init__(self, input_size, num_classes, learning_rate):
-        super().__init__()
-        self.lr = learning_rate
-        self.fc1 = nn.Linear(input_size, 50)
-        self.fc2 = nn.Linear(50, num_classes)
-        self.loss_fn = nn.CrossEntropyLoss()
-        self.accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes
-        )
-        self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes)
+#     def training_step(self, batch, batch_idx):
+#         x, y = batch
+#         loss, scores, y = self._common_step(batch, batch_idx)
+#         self.log_dict(
+#             {
+#                 "train_loss": loss,
+#             },
+#             on_step=False,
+#             on_epoch=True,
+#             prog_bar=True,
+#         )
+#         if batch_idx % 100 == 0:
+#             x = x[:8]
+#             grid = torchvision.utils.make_grid(x.view(-1, 1, 28, 28))
+#             self.logger.experiment.add_image("mnist_images", grid, self.global_step)
+#         return {"loss": loss, "scores": scores, "y": y}
 
-    def forward(self, x):
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.fc2(x)
-        return x
+#     def train_epoch_end(self, outputs):
+#         avg_loss = torch.stack([x["loss"] for x in outputs]).mean()
+#         scores = torch.cat([x["scores"] for x in outputs])
+#         y = torch.cat([x["y"] for x in outputs])
+#         self.log_dict(
+#             {
+#                 "train_loss": avg_loss,
+#                 "train_acc": self.accuracy(scores, y),
+#                 "train_f1": self.f1_score(scores, y),
+#             },
+#             on_step=False,
+#             on_epoch=True,
+#             prog_bar=True,
+#         )
 
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        loss, scores, y = self._common_step(batch, batch_idx)
-        self.log_dict(
-            {
-                "train_loss": loss,
-            },
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-        )
-        if batch_idx % 100 == 0:
-            x = x[:8]
-            grid = torchvision.utils.make_grid(x.view(-1, 1, 28, 28))
-            self.logger.experiment.add_image("mnist_images", grid, self.global_step)
-        return {"loss": loss, "scores": scores, "y": y}
+#     def validation_step(self, batch, batch_idx):
+#         loss, scores, y = self._common_step(batch, batch_idx)
+#         self.log("val_loss", loss)
+#         return loss
 
-    def train_epoch_end(self, outputs):
-        avg_loss = torch.stack([x["loss"] for x in outputs]).mean()
-        scores = torch.cat([x["scores"] for x in outputs])
-        y = torch.cat([x["y"] for x in outputs])
-        self.log_dict(
-            {
-                "train_loss": avg_loss,
-                "train_acc": self.accuracy(scores, y),
-                "train_f1": self.f1_score(scores, y),
-            },
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-        )
+#     def test_step(self, batch, batch_idx):
+#         loss, scores, y = self._common_step(batch, batch_idx)
+#         self.log("test_loss", loss)
+#         return loss
 
-    def validation_step(self, batch, batch_idx):
-        loss, scores, y = self._common_step(batch, batch_idx)
-        self.log("val_loss", loss)
-        return loss
+#     def _common_step(self, batch, batch_idx):
+#         x, y = batch
+#         x = x.reshape(x.size(0), -1)
+#         scores = self.forward(x)
+#         loss = self.loss_fn(scores, y)
+#         return loss, scores, y
 
-    def test_step(self, batch, batch_idx):
-        loss, scores, y = self._common_step(batch, batch_idx)
-        self.log("test_loss", loss)
-        return loss
+#     def predict_step(self, batch, batch_idx):
+#         x, y = batch
+#         x = x.reshape(x.size(0), -1)
+#         scores = self.forward(x)
+#         preds = torch.argmax(scores, dim=1)
+#         return preds
 
-    def _common_step(self, batch, batch_idx):
-        x, y = batch
-        x = x.reshape(x.size(0), -1)
-        scores = self.forward(x)
-        loss = self.loss_fn(scores, y)
-        return loss, scores, y
-
-    def predict_step(self, batch, batch_idx):
-        x, y = batch
-        x = x.reshape(x.size(0), -1)
-        scores = self.forward(x)
-        preds = torch.argmax(scores, dim=1)
-        return preds
-
-    def configure_optimizers(self):
-        return optim.Adam(self.parameters(), lr=self.lr)
+#     def configure_optimizers(self):
+#         return optim.Adam(self.parameters(), lr=self.lr)

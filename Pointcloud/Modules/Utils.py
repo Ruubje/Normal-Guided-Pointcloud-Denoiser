@@ -23,7 +23,7 @@ from sklearn.preprocessing import normalize as sklearn_preprocessing_normalize
 from torch import (
     arange as torch_arange,
     bool as torch_bool,
-    double as torch_double,
+    float as torch_float,
     from_numpy as torch_from_numpy,
     long as torch_long,
     repeat_interleave as torch_repeat_interleave,
@@ -163,11 +163,11 @@ class SlicedTorchData:
         assert reduction in ("sum", "prod", "mean", "amax", "amin")
 
         _data = self.data
-        means = torch_zeros(len(self), dtype=torch_double, device=_data.device) \
+        means = torch_zeros(len(self), dtype=torch_float, device=_data.device) \
             .scatter_reduce_(
                 dim=0, 
                 index=self._batchIndices(), 
-                src=_data.to(torch_double), 
+                src=_data.to(torch_float), 
                 reduce=reduction
             )
         return means

@@ -1,4 +1,4 @@
-from pytorch_lightning.callbacks import EarlyStopping, Callback
+from pytorch_lightning.callbacks import EarlyStopping, Callback, ModelCheckpoint
 
 class MyPrintingCallback(Callback):
     def __init__(self):

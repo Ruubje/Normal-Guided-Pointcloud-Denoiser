@@ -65,7 +65,7 @@ class Selector:
             nodes_mask[torch_arange(I, device=device), indices] = True
         else:
             nodes_mask = torch_eye(N, dtype=bool, device=device)
-        for _ in tqdm(range(k), desc="Calculating k-ring in batches."):
+        for _ in range(k):
             _temp_edges = nodes_mask[:, start].view(-1)
             _temp_num_edges = _temp_edges.nonzero().view(-1)
             _temp_indices = end[_temp_num_edges % E] + N * torch_div(_temp_num_edges, E, rounding_mode=ROUNDING_MODE)
@@ -74,7 +74,7 @@ class Selector:
         slices = TorchUtils.maskToSlices(nodes_mask)
         return SlicedTorchData(data, slices)
         
-    def getTwoRings(self, _edge_index: torch_Tensor, indices: torch_Tensor=None) -> list[torch_Tensor]:
+    def getTwoRings(self, _edge_index: torch_Tensor, indices: torch_Tensor=None) -> SlicedTorchData:
         # Batched algorithm can take up too much space, so if it does, the it while looping over array
         TorchUtils.validateEdgeIndex(_edge_index)
         try:
@@ -83,10 +83,11 @@ class Selector:
             # return [result[i].nonzero() for i in tqdm(range(result.size(0)), desc="Extracting Tworings per node.")]
         except Exception as e:
             warnings_warn(str(e.with_traceback()), category=Warning)
-            _g = self.graph
-            _edge_index = _g.edge_index
-            N = _g.num_nodes
-            return [self.getKRing(2, _edge_index, i, N) for i in range(N)]
+            raise ValueError("Oh nooooooo")
+            # _g = self.graph
+            # _edge_index = _g.edge_index
+            # N = _g.num_nodes
+            # return [self.getKRing(2, _edge_index, i, N) for i in range(N)]
     
     def getRadiiVectorized(self, tworings: SlicedTorchData, k: int=config.K_PATCH_RADIUS) -> torch_Tensor:
         _g = self.graph
@@ -101,16 +102,18 @@ class Selector:
         radii = k*meantworingmasses**0.5
         return radii
     
-    def getPointsInRangeVectorized(self, radii: torch_Tensor) -> SlicedTorchData:
-        _g = self.graph
-        N = _g.num_nodes
+    def getPointsInRangeVectorized(self, radii: torch_Tensor, indices: torch_Tensor = None) -> SlicedTorchData:
+        TorchUtils.validateIndices(indices)
+
+        _graph = self.graph
+        N = _graph.num_nodes if indices is None else indices.size(0)
         device = radii.device
 
         assert radii.dim() == 1
-        assert radii.size(0) == N
+        assert radii.size(0) == N, f"Actual: {radii.size(0)}\nExpected: {N}"
         assert radii.is_floating_point()
 
-        nearby_vertices = self.kdtree.query_ball_point(self.graph.pos, radii)
+        nearby_vertices = self.kdtree.query_ball_point(_graph.pos[indices], radii)
         data = torch_from_numpy(np_concatenate(nearby_vertices)).to(device=device, dtype=torch_int64)
         slices = torch_zeros(radii.size(0) + 1, dtype=int, device=device)
         slices[1:] = torch_tensor([len(x) for x in nearby_vertices]).cumsum(dim=0)
@@ -129,6 +132,6 @@ class Selector:
         # radii = [self.getRadius(tr) for tr in tqdm(tworings, desc="Collecting radii")]
         radii = self.getRadiiVectorized(tworings)
         # Select points in ball
-        nearby_vertices = self.getPointsInRangeVectorized(radii)
+        nearby_vertices = self.getPointsInRangeVectorized(radii, indices)
         # Get graph nodes from vertices in range
         return nearby_vertices

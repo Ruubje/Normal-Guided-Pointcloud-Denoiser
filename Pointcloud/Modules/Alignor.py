@@ -34,7 +34,7 @@ class Alignor:
         _g = self.graph
         _device = _g.edge_index.device
         _data = selection.data
-        # To Numpy convertions
+        I = len(selection)
         N = _g.num_nodes
         P = _data.size(0)
         # (N, 3)
@@ -43,8 +43,8 @@ class Alignor:
         ci = _g.pos
         # (N, 1)
         _mass = _g.mass
+        # (P,)
         bindex = selection._batchIndices()
-
         # (P, 3)
         cj = ci[_data]
         # (P, 3)
@@ -80,26 +80,26 @@ class Alignor:
         outer = njprime[..., None] * njprime[:, None]
         # (N, P, 3, 3)
         Tj = muj[..., None, None] * outer
-        # (N, 3, 3)
-        Ti = torch_zeros((N, 3, 3), dtype=Tj.dtype, device=_device) \
+        # (I, 3, 3)
+        Ti = torch_zeros((I, 3, 3), dtype=Tj.dtype, device=_device) \
                     .scatter_reduce_(
                         dim=0,
                         index=bindex[:, None, None].expand(P, 3, 3),
                         src=Tj,
                         reduce="sum"
                     )
-        # ((N, 3), (N, 3, 3))
+        # ((I, 3), (I, 3, 3))
         eigh = torch_linalg_eigh(Ti)
         return ci, scale_factors, eigh
     
     @classmethod
     def getGroups(cls, eigval: torch_Tensor) -> torch_Tensor:
-        assert eigval.dim == 2
+        assert eigval.dim() == 2
         assert eigval.size(1) == 3
         assert eigval.is_floating_point()
 
         N = eigval.size(0)
-        eigval_f = eigval.sort(dim=1, descending=True)
+        eigval_f = eigval.sort(dim=1, descending=True).values
         flat = torch_logical_and(eigval_f[:, 1] < 0.01, eigval_f[:, 2] < 0.001)
         edge = torch_logical_and(eigval_f[:, 1] > 0.01, eigval_f[:, 2] < 0.1)
         corner = eigval_f[:, 2] > 0.1
@@ -109,15 +109,15 @@ class Alignor:
         char[corner] = 3
         return char
     
-    def getRInv(self, eigh: typing_Tuple[torch_Tensor, torch_Tensor], selection: SlicedTorchData, indices: torch_Tensor = None) -> torch_Tensor:
+    def getRInv(self, eigh: typing_Tuple[torch_Tensor, torch_Tensor], indices: torch_Tensor = None) -> torch_Tensor:
         assert eigh[0].dim() == 2 and eigh[1].dim() == 3
         assert eigh[0].size(1) == 3 and eigh[1].size(1) == 3 and eigh[1].size(2) == 3
         assert eigh[0].size(0) == eigh[1].size(0)
         assert eigh[0].is_floating_point() and eigh[1].is_floating_point()
         if indices is not None:
             assert indices.dim() == 1
-            assert indices.size(0) == eigh[0].size(0)
-            assert indices.is_floating_point()
+            assert indices.size(0) == eigh[0].size(0), f"indices.size(): {indices.size()}\n eigh[0].size(): {eigh[0].size()}"
+            assert not indices.is_floating_point()
 
         _g = self.graph
         eigval, eigvec = eigh
