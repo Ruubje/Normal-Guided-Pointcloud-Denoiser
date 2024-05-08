@@ -32,6 +32,7 @@ from torch import (
     zeros as torch_zeros,
     zeros_like as torch_zeros_like
 )
+import torch.cuda as torch_cuda
 from torch.nn.functional import (
     normalize as t_nn_f_normalize
 )
@@ -140,7 +141,7 @@ class SlicedTorchData:
         object.__setattr__(self, name, value)
 
     def _assertData(self, _data: torch_Tensor):
-        assert _data.dim() == 1
+        assert _data.dim() == 1, f"Actual size of data: {_data.size()}"
         if hasattr(self, "slices"):
             assert _data.size(0) == self.slices[-1]
 
@@ -149,7 +150,7 @@ class SlicedTorchData:
         assert not _slices.is_floating_point()
         assert _slices[0] == 0
         if hasattr(self, "data"):
-            assert self.data.size(0) == _slices[-1]
+            assert self.data.size(0) == _slices[-1], f"Data size: {self.data.size(0)}\nSlices last entry: {_slices[-1]}"
     
     def _batchIndices(self) -> torch_Tensor:
         _slices = self.slices
@@ -157,7 +158,7 @@ class SlicedTorchData:
         assert not _slices.is_floating_point(), "slices must contain integers"
         assert _slices is not None, "slices cannot be None"
 
-        return torch_repeat_interleave(torch_arange(_slices.size(0) - 1), _slices[1:] - _slices[:-1])
+        return torch_repeat_interleave(torch_arange(_slices.size(0) - 1, device=_slices.device), _slices[1:] - _slices[:-1])
     
     def scatterReduce(self, reduction: str) -> torch_Tensor:
         assert reduction in ("sum", "prod", "mean", "amax", "amin")
@@ -201,19 +202,24 @@ class TorchUtils:
         assert fv.size(0) == fn.size(0), "For every face there should be references to points and normals."
         assert v.size(1) == n.size(1), "v and n should have the same number of euclidian dimensions"
         
-        vn = torch_zeros_like(v)
+        vn = torch_zeros_like(v, device=v.device)
         vn.index_add_(0, fv.view(-1), n[fn].view(-1, 3))
         return t_nn_f_normalize(vn, dim=-1)
     
     @classmethod
-    def maskToSlices(cls, mask: torch_Tensor) -> torch_Tensor:
+    def maskToSlicedTorchData(cls, mask: torch_Tensor) -> torch_Tensor:
         assert mask.dim() == 2, "mask must have 2 dimensions"
         assert mask.dtype == torch_bool, "Mask must contain booleans"
         assert mask is not None, "Mask cannot be None"
 
-        slices = torch_zeros(mask.size(0) + 1, dtype=torch_long)
-        slices[1:] = mask.sum(dim=1).cumsum(dim=0)
-        return slices
+        N1, N2 = mask.size(0), mask.size(1)
+        idxs = mask.view(-1).nonzero().squeeze()
+        data = idxs.remainder(N1)
+        slices = torch_zeros(N1 + 1, dtype=torch_long, device=mask.device)
+        u_idx, count = (idxs / N2).floor_().long().unique(return_counts=True)
+        slices[u_idx + 1] = count
+        slices = slices.cumsum_(dim=0)
+        return SlicedTorchData(data, slices)
     
 class DeprecatedUtils:
 

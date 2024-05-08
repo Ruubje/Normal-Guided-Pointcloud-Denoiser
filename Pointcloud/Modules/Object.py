@@ -69,7 +69,7 @@ class Pointcloud:
         self.file_path = file_path
 
     @classmethod
-    def loadObj(cls, file_path: str) -> Pointcloud:
+    def loadObj(cls, file_path: str, device='cpu') -> Pointcloud:
         r"""
         We only implement loading, since saving doesn't work with this library...
         """
@@ -78,7 +78,7 @@ class Pointcloud:
         assert path.suffix == ".obj"
 
         v, _, n, fv, _, fn = igl_read_obj(file_path)
-        v, n, fv, fn = torch_tensor(v, dtype=torch_float), torch_tensor(n, dtype=torch_float), torch_tensor(fv, dtype=torch_long), torch_tensor(fn, dtype=torch_long)
+        v, n, fv, fn = torch_tensor(v, dtype=torch_float, device=device), torch_tensor(n, dtype=torch_float, device=device), torch_tensor(fv, dtype=torch_long, device=device), torch_tensor(fn, dtype=torch_long, device=device)
         if n.size(0) > 0 and fn.size(0) > 0:
             pointcloud = Pointcloud(v, TorchUtils.face2vertexNormals(v, fv, n, fn))
         elif n.size(0) > 0 and v.size(0) == n.size(0):

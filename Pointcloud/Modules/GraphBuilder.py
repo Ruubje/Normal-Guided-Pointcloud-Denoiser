@@ -75,7 +75,7 @@ class GraphBuilder:
     def addLaplacianToGraph(self) -> None:
         _device = self.device
         _graph = self.graph
-        L, M = robust_pointcloud_laplacian(self.pointcloud.v.numpy())
+        L, M = robust_pointcloud_laplacian(self.pointcloud.v.cpu().numpy())
         Lcoo = L.tocoo()
         _graph.edge_index, _graph.mass = torch_from_numpy(np_vstack((Lcoo.row, Lcoo.col))).long().to(_device),\
                                                     torch_from_numpy(M.data).float().to(_device)

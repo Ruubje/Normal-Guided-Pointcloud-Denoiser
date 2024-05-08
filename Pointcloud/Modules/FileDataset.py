@@ -1,17 +1,19 @@
-from Pointcloud.Modules.Utils import GeneralUtils
+from . import Config as config
 from .Noise import Noise
 from .Object import Pointcloud
 from .Preprocessor import Preprocessor
+from .Utils import GeneralUtils
 
 from dataclasses import dataclass
+from gc import collect as gc_collect
 from pathlib import Path
 from shutil import copy2 as shutil_copy2
 from tqdm import tqdm
 from torch import (
+    cuda as torch_cuda,
     load as torch_load,
     randperm as torch_randperm,
-    save as torch_save,
-    Tensor as torch_Tensor
+    save as torch_save
 )
 from torch_geometric.data import (
     Batch as tg_data_Batch,
@@ -134,6 +136,7 @@ class FileDataset(tg_data_InMemoryDataset):
         self.train_ds = tg_data_Batch.from_data_list(data0[_splitIndices[0]] + data1[_splitIndices[3]])
         self.val_ds = tg_data_Batch.from_data_list(data0[_splitIndices[1]] + data1[_splitIndices[4]])
         self.test_ds = tg_data_Batch.from_data_list(data0[_splitIndices[2]] + data1[_splitIndices[5]])
+        print(f"train bs: {self.train_ds.batch_size}\nval bs: {self.val_ds.batch_size}\ntest bs: {self.test_ds.batch_size}")
     
     @property
     def raw_file_names(self) -> list[str]:
@@ -165,13 +168,14 @@ class FileDataset(tg_data_InMemoryDataset):
                 pointcloud.saveObj(Path(self.raw_dir) + Path(pointcloud.file_path).name)
 
     def process(self):
+        _device = config.ACCELERATOR
         _raw_paths = self.raw_paths
         _nl = self.noise_levels
         _pdir = Path(self.processed_dir)
         data_list = []
         for path in _raw_paths:
             _stem = Path(path).stem
-            pointcloud = Pointcloud.loadObj(path)
+            pointcloud = Pointcloud.loadObj(path, _device)
             preprocessor = Preprocessor(pointcloud)
             noise = Noise(preprocessor.graph)
             classes_file = _pdir / (_stem + self.CLASSES + self.EXTENSION)
@@ -196,7 +200,8 @@ class FileDataset(tg_data_InMemoryDataset):
                     file_location = _pdir / (_stem + self.GAUSSIAN + str(level) + group + self.EXTENSION)
                     if not file_location.exists():
                         noise.generateNoise(level, 0, 0)
-                        data_list = preprocessor.getPatches(indices[i])
+                        preprocessor.graphBuilder.generateNormals()
+                        data_list, _ = preprocessor.getPatches(indices[i])
                         store = tg_data_Batch.from_data_list(data_list)
                         torch_save(store, str(file_location))
             for level in tqdm(_nl.impulsive, desc=f"Preprocessing gaussian noise for {_stem}"):
@@ -205,9 +210,12 @@ class FileDataset(tg_data_InMemoryDataset):
                     file_location = _pdir / (_stem + self.IMPULSIVE + str(level) + group + self.EXTENSION)
                     if not file_location.exists():
                         noise.generateNoise(level, 1, 0)
-                        data_list = preprocessor.getPatches(indices[i])
+                        preprocessor.graphBuilder.generateNormals()
+                        data_list, _ = preprocessor.getPatches(indices[i])
                         store = tg_data_Batch.from_data_list(data_list)
                         torch_save(store, str(file_location))
+        torch_cuda.empty_cache()
+        gc_collect()
     
     def len(self) -> int:
         return len(self._data)

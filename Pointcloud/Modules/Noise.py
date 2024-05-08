@@ -8,8 +8,10 @@ from numpy.random import choice as np_random_choice, normal as np_random_normal
 from pathlib import Path
 
 from torch import (
+    float as torch_float,
     full as torch_full,
     load as torch_load,
+    long as torch_long,
     normal as torch_normal,
     randperm as torch_randperm,
     save as torch_save,
@@ -53,13 +55,14 @@ class Noise:
         self.noise_direction = noise_direction
         
         _graph = self.graph
-        _gt = self.getGT()
+        _gt, _ = self.getGT()
         _num_nodes = _graph.num_nodes
         _num_nodes_size = (_num_nodes, 3)
         _edge_index = _graph.edge_index
+        _device = _edge_index.device
         avg_edge_length = (_gt[_edge_index[1]] - _gt[_edge_index[0]]).norm(dim=1).mean(dim=0)
         standard_deviation = avg_edge_length * noise_level
-        random_numbers = torch_normal(torch_zeros(_num_nodes_size), torch_full(_num_nodes_size, standard_deviation))
+        random_numbers = torch_normal(torch_zeros(_num_nodes_size, device=_device, dtype=torch_float), torch_full(_num_nodes_size, standard_deviation, device=_device, dtype=torch_float))
         random_offset = random_numbers if noise_direction == 1 else _graph.n * random_numbers[:, 0, None]
         if noise_type == 1:
             _random_indices = torch_randperm(_num_nodes)[:int(_num_nodes*(1 - noise_level))]
@@ -69,19 +72,21 @@ class Noise:
     
     def getGT(self):
         _graph = self.graph
-        if hasattr(_graph, "gt"):
-            return _graph.gt
-        else:
-            return _graph.pos
+        _pos = _graph.gt if hasattr(_graph, "gt") else _graph.pos
+        _normal = _graph.gt_n if hasattr(_graph, "gt_n") else _graph.n
+        return _pos, _normal
 
     def setNoise(self, noise: torch_Tensor):
         _graph = self.graph
 
         # Save ground truth if non exists yet
-        _graph.gt = self.getGT()
+        _graph.gt, _graph.gt_n = self.getGT()
         
         # Apply noise
         _graph.pos = noise
+
+        # Remove normals, because they do not match with positions anymore
+        delattr(_graph, "n")
 
     def resetNoise(self):
         _object = self.graph

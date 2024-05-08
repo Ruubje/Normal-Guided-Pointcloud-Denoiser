@@ -5,18 +5,14 @@ from dataclasses import (
 )
 from torch import (
     cat as torch_cat,
-    int64 as torch_int64,
+    long as torch_long,
+    minimum as torch_minimum,
     ones as torch_ones,
     tensor as torch_tensor,
     Tensor as torch_Tensor,
     zeros as torch_zeros
 )
-from torch.optim import Adam as torch_Adam
-from torch.nn.functional import (
-    cosine_embedding_loss as torch_cos_loss,
-    mse_loss as torch_val_loss,
-    normalize as torch_normalize
-)
+from torch import cuda as torch_cuda
 from torch.nn import (
     BatchNorm1d as torch_BatchNorm1d,
     Dropout as torch_Dropout,
@@ -24,6 +20,13 @@ from torch.nn import (
     Linear as torch_Linear,
     Sequential as torch_Sequential
 )
+from torch.nn.functional import (
+    cosine_embedding_loss as torch_cos_loss,
+    cosine_similarity as torch_nn_f_cosine_similarity,
+    mse_loss as torch_val_loss,
+    normalize as torch_normalize
+)
+from torch.optim import Adam as torch_Adam
 from torch_geometric.nn.conv import (
     DynamicEdgeConv as tg_DynamicEdgeConv,
     EdgeConv as tg_EdgeConv
@@ -33,16 +36,22 @@ from torch_geometric.nn.pool import (
     global_max_pool as tg_global_max_pool
 )
 import pytorch_lightning as pl
+def printGPUStats():
+    t = torch_cuda.get_device_properties(0).total_memory
+    r = torch_cuda.memory_reserved(0)
+    a = torch_cuda.memory_allocated(0)
+    f = r-a  # free inside reserved
+    print(f"t: {t / 1024 ** 3} GB\nr: {r / 1024 ** 2} MB\na: {a / 1024 ** 2} MB\nf: {f / 1024 ** 2} MB")
+
 
 def custom_val_loss(input: torch_Tensor, target: torch_Tensor) -> torch_Tensor:
-    loss1 = (input + target).square().mean(dim=1, keepdim=True)
-    loss2 = (input - target).square().mean(dim=1, keepdim=True)
-    return torch_cat([loss1, loss2], dim=1).min(dim=1).values.mean(dim=0)
+    loss1 = (input + target).square().mean(dim=1)
+    loss2 = (input - target).square().mean(dim=1)
+    return torch_minimum(loss1, loss2).mean(dim=0)
 
 def custom_cos_loss(input: torch_Tensor, target: torch_Tensor) -> torch_Tensor:
-    loss1 = (input * target).sum(dim=1, keepdim=True)
-    loss2 = (input * -target).sum(dim=1, keepdim=True)
-    return torch_cat([loss1, loss2], dim=1).min(dim=1).values.mean(dim=0)
+    sim = torch_nn_f_cosine_similarity(input, target)
+    return torch_minimum(1 - sim, 1 + sim).mean(dim=0)
 
 @dataclass
 class NetworkModelConfiguration():
@@ -54,7 +63,7 @@ class NetworkModelConfiguration():
     number_postpool_linear_layers: int = config.NUM_POSTPOOL
     in_channels: int = config.INPUT_SIZE
     out_channels: int = config.OUTPUT_SIZE
-    feature_channels: torch_Tensor = torch_tensor(config.HIDDEN, dtype=torch_int64)
+    feature_channels: torch_Tensor = torch_tensor(config.HIDDEN, dtype=torch_long)
     dropout: float = config.DROPOUT_RATE
 
     def __post_init__(self):
@@ -142,42 +151,43 @@ class Patch2NormalModel(pl.LightningModule):
         _device = x.device
         _config = self.config
         num_convs = _config.num_edgeconv + _config.num_dynamic_edgeconv
-        pool_sizes = torch_cat([torch_zeros(1, dtype=torch_int64), _config.feature_channels[:num_convs].cumsum(dim=0)])
+        pool_sizes = torch_cat([torch_zeros(1, dtype=torch_long), _config.feature_channels[:num_convs].cumsum(dim=0)])
         x_cat = torch_zeros(x.size(0), pool_sizes[-1], device=_device)
         for i in range(_config.feature_channels.size(0)):
+            layer = getattr(self, f"layer{i}")
             if i < _config.num_edgeconv:
-                layer = getattr(self, f"layer{i}")
                 x = layer(x, edge_index)
                 x_cat[:, pool_sizes[i]:pool_sizes[i+1]] = x
             elif i < num_convs:
-                layer = getattr(self, f"layer{i}")
                 x = layer(x, batch)
                 x_cat[:, pool_sizes[i]:pool_sizes[i+1]] = x
             elif i < num_convs + _config.num_prepool_linear:
                 # Set last_x to be x_cat for the first prepool linear layer.
                 if i == num_convs:
                     x = x_cat
-                layer = getattr(self, f"layer{i}")
                 x = layer(x)
             else:
                 # Do pooling only first time.
                 if i == num_convs + _config.num_prepool_linear:
                     x1 = tg_global_max_pool(x, batch)
                     x2 = tg_global_mean_pool(x, batch)
+                    print(x.size(), x1.size(), x2.size(), batch.unique(return_counts=True))
                     x = torch_cat((x1, x2), dim=-1)
-                layer = getattr(self, f"layer{i}")
+                printGPUStats()
                 x = layer(x)
+            print(x.size())
         lastLayer = getattr(self, f"lastLayer")
         return lastLayer(x)
     
     def training_step(self, batch, batch_idx):
-        val_loss, cos_loss, c_val_loss, normals, _y = self._common_step(batch, batch_idx)
+        val_loss, cos_loss, c_val_loss, c_cos_loss, normals, _y = self._common_step(batch, batch_idx)
         batch_size = len(batch)
         self.log_dict(
             {
                 "train_val_loss": val_loss,
                 "train_cos_loss": cos_loss,
-                "train_custom_val_loss": c_val_loss
+                "train_custom_val_loss": c_val_loss,
+                "train_custom_cos_loss": c_cos_loss,
             },
             on_step=False,
             on_epoch=True,
@@ -191,15 +201,14 @@ class Patch2NormalModel(pl.LightningModule):
         return {"loss": c_val_loss, "val_loss": val_loss, "cos_loss": cos_loss, "output": normals, "y": _y}
 
     def validation_step(self, batch, batch_idx):
-        val_loss, cos_loss, c_val_loss, normals, y = self._common_step(batch, batch_idx)
+        val_loss, cos_loss, c_val_loss, c_cos_loss, normals, y = self._common_step(batch, batch_idx)
         batch_size = len(batch)
-        # self.log("val_val_loss", val_loss, batch_size=batch_size)
-        # self.log("val_cos_loss", cos_loss, batch_size=batch_size)
         self.log_dict(
             {
                 "val_val_loss": val_loss,
                 "val_cos_loss": cos_loss,
-                "val_custom_val_loss": c_val_loss
+                "val_custom_val_loss": c_val_loss,
+                "val_custom_cos_loss": c_cos_loss,
             },
             on_step=False,
             on_epoch=True,
@@ -209,15 +218,14 @@ class Patch2NormalModel(pl.LightningModule):
         return val_loss
 
     def test_step(self, batch, batch_idx):
-        val_loss, cos_loss, c_val_loss, normals, y = self._common_step(batch, batch_idx)
+        val_loss, cos_loss, c_val_loss, c_cos_loss, normals, y = self._common_step(batch, batch_idx)
         batch_size = len(batch)
-        # self.log("test_val_loss", val_loss, batch_size=batch_size)
-        # self.log("test_cos_loss", cos_loss, batch_size=batch_size)
         self.log_dict(
             {
                 "test_val_loss": val_loss,
                 "test_cos_loss": cos_loss,
-                "test_custom_val_loss": c_val_loss
+                "test_custom_val_loss": c_val_loss,
+                "test_custom_cos_loss": c_cos_loss,
             },
             on_step=False,
             on_epoch=True,
@@ -227,15 +235,17 @@ class Patch2NormalModel(pl.LightningModule):
         return val_loss
 
     def _common_step(self, batch, batch_idx):
+        print(f"Do common step! --> X Size: {batch.x.size()}")
         _x = batch.x
         _edge_index = batch.edge_index
         _batch = batch.batch
         normals = self.forward(_x, _edge_index, _batch)
         _y = batch.y
-        val_loss = torch_val_loss(normals, _y)
+        val_loss = torch_val_loss(normals, _y.repeat(normals.size(0), 1))
         cos_loss = torch_cos_loss(normals, _y, torch_ones((_y.size(0),), device=_y.device))
         c_val_loss = custom_val_loss(normals, _y)
-        return val_loss, cos_loss, c_val_loss, normals, _y
+        c_cos_loss = custom_cos_loss(normals, _y)
+        return val_loss, cos_loss, c_val_loss, c_cos_loss, normals, _y
 
     def predict_step(self, batch, batch_idx):
         _x = batch.x

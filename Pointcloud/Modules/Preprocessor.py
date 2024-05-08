@@ -57,9 +57,7 @@ class Preprocessor:
         # (Pi, 3)
         nj_R_inv = nj @ R_inv_i
         # (3,)
-        gt = _g.n[index]
-        # (1, 3)
-        gt_R_inv = gt[None] @ R_inv_i
+        gt = _g.gt_n[index]
         # (Pi, 3)
         n = nj_R_inv
         # (Pi, 1)
@@ -71,5 +69,5 @@ class Preprocessor:
         # (2, E)
         edge_index = tg_utils_subgraph(p, _edge_index, relabel_nodes=True)[0]
         # (1, 3)
-        y = gt_R_inv
+        y = gt[None] @ R_inv_i
         return tg_data_Data(x=x, edge_index=edge_index, y=y)
