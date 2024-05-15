@@ -238,6 +238,7 @@ class Patch2NormalModel(pl.LightningModule):
         print(f"Do common step! --> X Size: {batch.x.size()}")
         _x = batch.x
         _edge_index = batch.edge_index
+        print(f"batch.batch: {batch.batch.unique(return_counts=True)}\nbatch_idx: {batch_idx}")
         _batch = batch.batch
         normals = self.forward(_x, _edge_index, _batch)
         _y = batch.y

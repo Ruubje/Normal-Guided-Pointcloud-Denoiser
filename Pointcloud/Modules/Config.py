@@ -12,7 +12,7 @@ DROPOUT_RATE = 0.5
 HIDDEN = [64, 128, 256, 512, 256, 64]
 
 # Training Hyperparameters
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 NUM_EPOCHS = 100
 MODEL_NAME = "testmodel"
 
@@ -22,7 +22,7 @@ SPLIT_NAME = "Super_Cool_Split_Bro"
 SPLIT = (0.6, 0.2, 0.2)
 # NUM_WORKERS should be 4 * Num_GPU as a general rule.
 # https://discuss.pytorch.org/t/guidelines-for-assigning-num-workers-to-dataloader/813/4
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 
 # Logs
 LOG_DIR = "tb_logs"

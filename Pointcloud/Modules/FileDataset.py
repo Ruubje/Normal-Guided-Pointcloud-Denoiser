@@ -133,10 +133,10 @@ class FileDataset(tg_data_InMemoryDataset):
         data0 = _data[0]
         data1 = _data[1]
         _splitIndices = self.splitIndices
-        self.train_ds = tg_data_Batch.from_data_list(data0[_splitIndices[0]] + data1[_splitIndices[3]])
-        self.val_ds = tg_data_Batch.from_data_list(data0[_splitIndices[1]] + data1[_splitIndices[4]])
-        self.test_ds = tg_data_Batch.from_data_list(data0[_splitIndices[2]] + data1[_splitIndices[5]])
-        print(f"train bs: {self.train_ds.batch_size}\nval bs: {self.val_ds.batch_size}\ntest bs: {self.test_ds.batch_size}")
+        self.train_ds = data0[_splitIndices[0]] + data1[_splitIndices[3]]
+        self.val_ds = data0[_splitIndices[1]] + data1[_splitIndices[4]]
+        self.test_ds = data0[_splitIndices[2]] + data1[_splitIndices[5]]
+        print(f"train bs: {len(self.train_ds)}\nval bs: {len(self.val_ds)}\ntest bs: {len(self.test_ds)}")
     
     @property
     def raw_file_names(self) -> list[str]:
@@ -227,9 +227,10 @@ class FileDataset(tg_data_InMemoryDataset):
         return tg_loader_DataLoader(
             dataset=self.train_ds,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=num_workers,
             persistent_workers=True,
+            drop_last=True
         )
 
     def val_dataloader(self, batch_size, num_workers):
