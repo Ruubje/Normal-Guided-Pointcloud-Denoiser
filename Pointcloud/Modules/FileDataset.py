@@ -227,7 +227,7 @@ class FileDataset(tg_data_InMemoryDataset):
         return tg_loader_DataLoader(
             dataset=self.train_ds,
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=num_workers,
             persistent_workers=True,
             drop_last=True
