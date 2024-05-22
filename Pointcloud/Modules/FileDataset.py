@@ -2,26 +2,19 @@ from . import Config as config
 from .Noise import Noise
 from .Object import Pointcloud
 from .Preprocessor import Preprocessor
-from .Utils import GeneralUtils
 
 from dataclasses import dataclass
-from gc import collect as gc_collect
 from pathlib import Path
-from shutil import copy2 as shutil_copy2
 from tqdm import tqdm
 from torch import (
-    cuda as torch_cuda,
     load as torch_load,
     randperm as torch_randperm,
     save as torch_save
 )
+from torch.utils.data import get_worker_info as torch_utils_data_get_worker_info
 from torch_geometric.data import (
     Batch as tg_data_Batch,
-    DataLoader as tg_data_DataLoader,
     InMemoryDataset as tg_data_InMemoryDataset
-)
-from torch_geometric.loader import (
-    DataLoader as tg_loader_DataLoader
 )
 from typing import (
     Union as typing_Union,
@@ -49,14 +42,16 @@ class FileDataset(tg_data_InMemoryDataset):
     NON_FEATURE = "_nonfeature"
 
     def __init__(self, root: str,
-                pre_add_objects: list[Pointcloud] = None,
+                split_name: str,
+                dataset_idx: int = 0,
                 noise_levels: NoiseLevels=DEFAULT_NOISE_LEVELS,
-                split: typing_Tuple[float, float, float] = DEFAULT_SPLIT,
-                split_name: str = None,
+                split_distribution: typing_Tuple[float, float, float] = DEFAULT_SPLIT,
+                pre_add_objects: list[Pointcloud] = None,
                 transform=None,
                 pre_transform=None):
         if transform is not None or pre_transform is not None:
             warnings_warn("transform or pre_transform given. Methods for these are not implemented!")
+        assert dataset_idx >= 0 and dataset_idx <= 2
         
         self.objects = pre_add_objects
         self.noise_levels = noise_levels
@@ -65,19 +60,22 @@ class FileDataset(tg_data_InMemoryDataset):
         feature_graphs = []
         nonfeature_graphs = []
         for path in [x for x in _processed_paths if not x.endswith(self.CLASSES + self.EXTENSION)]:
-            store = torch_load(path)
+            # Load on cpu to prevent later multiprocess dataloader errors
+            store = torch_load(path, map_location="cpu")
             graph_list = tg_data_Batch.to_data_list(store)
             if path.endswith(self.NON_FEATURE + self.EXTENSION):
                 nonfeature_graphs += graph_list
             else:
                 feature_graphs += graph_list
-        self.data = (tg_data_Batch.from_data_list(feature_graphs), tg_data_Batch.from_data_list(nonfeature_graphs))
+        temp = (tg_data_Batch.from_data_list(feature_graphs), tg_data_Batch.from_data_list(nonfeature_graphs))
         try:
             self.loadSplitIndices(split_name)
         except:
-            self.generateSplitIndices(split=split)
+            self.generateSplitIndices(split=split_distribution)
             self.saveSplitIndices(split_name)
-        self.createDatasets()
+        
+        _splitIndices = self.splitIndices
+        self.data, self.slices = self.collate(temp[0][_splitIndices[dataset_idx]] + temp[1][_splitIndices[dataset_idx + 3]])
     
     def assertSplitIndices(self):
         if not hasattr(self, "splitIndices"):
@@ -127,16 +125,6 @@ class FileDataset(tg_data_InMemoryDataset):
             self.splitIndices = torch_load(file_path)
         else:
             raise ValueError("Can't find split file")
-    
-    def createDatasets(self):
-        _data = self._data
-        data0 = _data[0]
-        data1 = _data[1]
-        _splitIndices = self.splitIndices
-        self.train_ds = data0[_splitIndices[0]] + data1[_splitIndices[3]]
-        self.val_ds = data0[_splitIndices[1]] + data1[_splitIndices[4]]
-        self.test_ds = data0[_splitIndices[2]] + data1[_splitIndices[5]]
-        print(f"train bs: {len(self.train_ds)}\nval bs: {len(self.val_ds)}\ntest bs: {len(self.test_ds)}")
     
     @property
     def raw_file_names(self) -> list[str]:
@@ -214,42 +202,6 @@ class FileDataset(tg_data_InMemoryDataset):
                         data_list, _ = preprocessor.getPatches(indices[i])
                         store = tg_data_Batch.from_data_list(data_list)
                         torch_save(store, str(file_location))
-        torch_cuda.empty_cache()
-        gc_collect()
-    
-    def len(self) -> int:
-        return len(self._data)
-    
-    def get(self, idx: int):
-        return self._data[idx]
-
-    def train_dataloader(self, batch_size, num_workers):
-        return tg_loader_DataLoader(
-            dataset=self.train_ds,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            persistent_workers=True,
-            drop_last=True
-        )
-
-    def val_dataloader(self, batch_size, num_workers):
-        return tg_loader_DataLoader(
-            dataset=self.val_ds,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            persistent_workers=True,
-        )
-
-    def test_dataloader(self, batch_size, num_workers):
-        return tg_loader_DataLoader(
-            dataset=self.test_ds,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            persistent_workers=True,
-        )
 
 def getGroupSizes(features: int, non_features: int, r: float = 1.5) -> typing_Union[int, int]:
     ratio = float(features) / float(non_features)

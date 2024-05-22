@@ -32,6 +32,7 @@
 
 # Object files don't need to be stored anymore..
 *.obj
+*.mtl
 
 # Settings files
 *.ini
@@ -61,7 +62,12 @@ src/
 
 # Tensorboard log files
 *.Ruben
+*events.out*
+*hparams.yaml
+*.ckpt
+*.trace.json
 
 # Split and dataset saves
 *.npy
 *.h5
+*.split

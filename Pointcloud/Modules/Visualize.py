@@ -28,6 +28,7 @@ from torch.linalg import (
     eigh as torch_linalg_eigh
 )
 from torch.nn.functional import normalize as torch_nn_functional_normalize
+from torch_geometric.data import Data as tg_data_Data
 from typing import (
     Callable as typing_Callable
 )
@@ -146,3 +147,18 @@ def visNormalTensorVoting(v: torch_Tensor, n: torch_Tensor, weight: torch_Tensor
     plot_plane(ax, center, eigvec[:, 0], r, 0.5)
     plot_vectors(ax, torch_zeros_like(points), points, color="purple", arrow_length_ratio=0.05, linewidth=0.3)
     return fig, ax
+
+def visSample(data: tg_data_Data):
+    assert hasattr(data, "x") and data.x is not None
+    assert hasattr(data, "edge_index") and data.edge_index is not None
+    assert hasattr(data, "y") and data.y is not None
+
+    _x = data.x
+    _pos = _x[:, :3]
+    _edge_index = data.edge_index
+    _n = _x[:, 3:6]
+    _y = data.y
+    plot = mp_plot(_pos.numpy())
+    plot.add_lines(_pos[_edge_index[0]].numpy(), _pos[_edge_index[1]].numpy())
+    plot.add_lines(_pos.numpy(), (_pos + _n).numpy())
+    plot.add_lines(_pos[0].numpy(), (_pos[0] + _y).numpy())

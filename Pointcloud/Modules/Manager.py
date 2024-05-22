@@ -15,12 +15,7 @@ from .Preprocessor import Preprocessor
 
 from pathlib import Path
 
-from torch_geometric.data import (
-    Batch as tg_data_Batch,
-    DataLoader as tg_data_DataLoader
-)
-
-from torch_geometric.profile import get_data_size as tg_profile_get_data_size
+from torch_geometric.loader import DataLoader as tg_loader_Dataloader
 
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.profilers import PyTorchProfiler
@@ -50,34 +45,71 @@ class Manager:
 
         self.model = Patch2NormalModel()
 
-        dm = FileDataset(config.DATA_DIR, split_name=config.SPLIT_NAME, split=config.SPLIT)
-        self.train_dl = dm.train_dataloader(config.BATCH_SIZE, config.NUM_WORKERS)
-        self.val_dl = dm.val_dataloader(config.BATCH_SIZE, config.NUM_WORKERS)
-        self.test_dl = dm.test_dataloader(config.BATCH_SIZE, config.NUM_WORKERS)
+        self.train_dl = tg_loader_Dataloader(
+            dataset=FileDataset(
+                config.DATA_DIR,
+                dataset_idx=0,
+                split_name=config.SPLIT_NAME,
+                split_distribution=config.SPLIT
+            ),
+            batch_size=config.BATCH_SIZE,
+            shuffle=True,
+            num_workers=config.NUM_WORKERS,
+            persistent_workers=True,
+            pin_memory=True,
+            pin_memory_device=config.ACCELERATOR
+        )
+        self.val_dl = tg_loader_Dataloader(
+            dataset=FileDataset(
+                config.DATA_DIR,
+                dataset_idx=1,
+                split_name=config.SPLIT_NAME,
+                split_distribution=config.SPLIT
+            ),
+            batch_size=config.BATCH_SIZE,
+            shuffle=False,
+            num_workers=config.NUM_WORKERS,
+            persistent_workers=True,
+            pin_memory=True,
+            pin_memory_device=config.ACCELERATOR
+        )
+        self.test_dl = tg_loader_Dataloader(
+            dataset=FileDataset(
+                config.DATA_DIR,
+                dataset_idx=2,
+                split_name=config.SPLIT_NAME,
+                split_distribution=config.SPLIT
+            ),
+            batch_size=config.BATCH_SIZE,
+            shuffle=False,
+            num_workers=config.NUM_WORKERS,
+            persistent_workers=True,
+            pin_memory=True,
+            pin_memory_device=config.ACCELERATOR
+        )
 
-        monitor_loss = "val_custom_val_loss"
         self.trainer = pl.Trainer(
             profiler=profiler,
             logger=logger,
             accelerator=config.ACCELERATOR,
             devices=config.DEVICES,
-            min_epochs=1,
+            min_epochs=config.MIN_EPOCHS,
             max_epochs=config.NUM_EPOCHS,
             precision=config.PRECISION,
             callbacks=[
                 ModelCheckpoint(
-                    monitor=monitor_loss,
+                    monitor=config.MONITOR_LOSS,
                     filename='{config.MODEL_NAME}-epoch{epoch:02d}-{monitor_loss}{val_val_loss:.2f}',
                     auto_insert_metric_name=False,
                     save_top_k=5,
                 ),
                 MyPrintingCallback(),
-                EarlyStopping(monitor=monitor_loss, patience=10)
+                EarlyStopping(monitor=config.MONITOR_LOSS, patience=10)
             ],
         )
         torch.cuda.empty_cache()
         ms = getModelSize(self.model) / 1024 ** 2
-        tds = sum([x.numel() * x.element_size() for x in self.train_dl.dataset.to_dict().values()]) / 1024 ** 2
+        tds = sum([x.numel() * x.element_size() for x in self.train_dl.dataset._data.to_dict().values()]) / 1024 ** 2
         print(f"Model size: {ms} MB\nTrain Dataset size: {tds} MB")
 
     def assertCheckpointFile(self, checkpoint: str):
@@ -100,9 +132,8 @@ class Manager:
     def predict(self, preprocessor: Preprocessor, from_checkpoint: str=None):
         self.assertCheckpointFile(from_checkpoint)
         graphs, RInv = preprocessor.getPatches()
-        ds = tg_data_Batch.from_data_list(graphs)
-        dl = tg_data_DataLoader(
-            dataset=ds,
+        dl = tg_loader_Dataloader(
+            dataset=graphs,
             batch_size=config.BATCH_SIZE,
             shuffle=False,
             num_workers=config.NUM_WORKERS,
