@@ -1,43 +1,29 @@
 from .Object import Pointcloud
-from .Utils import GeneralUtils
+from .Utils import GeneralUtils, TorchUtils
 
 from deltaconv.geometry import (
     estimate_basis as dc_geo_estimate_basis
-)
-from igl import (
-    vertex_triangle_adjacency as igl_vertex_triangle_adjacency,
-    per_vertex_normals as igl_per_vertex_normals,
-    per_face_normals as igl_per_face_normals,
-    vertex_triangle_adjacency as igl_vertex_triangle_adjacency
 )
 from math import (
     cos as math_cos,
     pi as math_pi
 )
 from numpy import (
-    any as np_any,
-    arange as np_arange,
-    argwhere as np_argwhere,
-    cross as np_cross,
-    logical_not as np_logical_not,
-    nan_to_num as np_nan_to_num,
-    ndarray as np_ndarray,
-    ones as np_ones,
-    unique as np_unique,
     vstack as np_vstack,
-    zeros as np_zeros
 )
 from robust_laplacian import point_cloud_laplacian as robust_pointcloud_laplacian
-from sklearn.preprocessing import normalize as sklearn_preprocessing_normalize
 from torch import (
     arange as torch_arange,
     argmax as torch_argmax,
     argsort as torch_argsort,
+    float as torch_float,
     from_numpy as torch_from_numpy,
-    long as torch_long,
-    stack as torch_stack,
     Tensor as torch_Tensor,
     zeros as torch_zeros
+)
+from torch.linalg import (
+    eigh as torch_linalg_eigh,
+    svd as torch_linalg_svd
 )
 from torch_cluster import (
     knn_graph as tc_knn_graph
@@ -47,11 +33,6 @@ from torch_geometric.utils import (
     to_undirected as tg_utils_to_undirected
 )
 from tqdm import tqdm
-from typing import (
-    Any as typing_Any,
-    Tuple as typing_Tuple
-)
-from warnings import warn
 
 class GraphBuilder:
     r"""
@@ -67,33 +48,79 @@ class GraphBuilder:
         if pointcloud.hasNormals():
             self.graph.n = pointcloud.n
 
-    def generateGraph(self) -> tg_data_Data:
-        self.addLaplacianToGraph()
-        self.generateNormals()
-        return self.graph
-
-    def addLaplacianToGraph(self) -> None:
-        _device = self.device
+    def setTriangleGraphWithFlippedNormals(self) -> tg_data_Data:
         _graph = self.graph
+        _graph.edge_index, _graph.mass = self.getLaplacianEdgeIndex()
+        self.setAndFlipNormals()
+        return self.graph
+    
+    def getKNNEdgeIndex(self, k: int = 12) -> None:
+        _graph = self.graph
+        GeneralUtils.validateAttributes(_graph, ["pos"])
+        return tc_knn_graph(_graph.pos, k, flow="target_to_source")
+
+    def getLaplacianEdgeIndex(self) -> None:
+        _device = self.device
         L, M = robust_pointcloud_laplacian(self.pointcloud.v.cpu().numpy())
         Lcoo = L.tocoo()
-        _graph.edge_index, _graph.mass = torch_from_numpy(np_vstack((Lcoo.row, Lcoo.col))).long().to(_device),\
+        return torch_from_numpy(np_vstack((Lcoo.row, Lcoo.col))).long().to(_device),\
                                                     torch_from_numpy(M.data).float().to(_device)
 
-    def generateNormals(self, flip=False) -> None:
-        if not hasattr(self.graph, "n") or self.graph.n is None:
-            self.generateNormalsDeltaconv()
+    def setAndFlipNormals(self, flip: bool = True) -> None:
+        _graph = self.graph
+        GeneralUtils.validateAttributes(_graph, ["edge_index"])
+        self.setPVTNormals(_graph.edge_index)
         if flip:
-            self.calculateEdgeCost()
-            mst, _ = self.calculateUndirectedMST()
-            self.flipNormals(mst)
+            self.flipNormals()
     
-    def generateNormalsDeltaconv(self, edge_index: torch_Tensor = None) -> None:
+    def getDeltaconvCoordinates(self, knn_edge_index: torch_Tensor = None, k: int = 12) -> None:
         _graph = self.graph
         GeneralUtils.validateAttributes(_graph, ['pos'])
-        if edge_index is None:
-            edge_index = tc_knn_graph(_graph.pos, k=12)
-        _graph.n, _, _ = dc_geo_estimate_basis(_graph.pos, edge_index, k=12)
+        if knn_edge_index is None:
+            knn_edge_index = tc_knn_graph(_graph.pos, k=k)
+        return dc_geo_estimate_basis(_graph.pos, knn_edge_index, k=k)
+
+    def setNormalsDeltaconv(self, knn_edge_index: torch_Tensor = None, k: int = 12) -> None:
+        DeltaConvCoordinates = self.getDeltaconvCoordinates(knn_edge_index, k)
+        self.graph.n = DeltaConvCoordinates[0]
+
+    def setPVTNormals(self, edge_index: torch_Tensor) -> None:
+        eigvec = self.getPVTDecompositionWithKNN(edge_index)
+        self.graph.n = eigvec[..., 0]
+
+    def getPVTDecompositionWithKNN(self, edge_index: torch_Tensor) -> None:
+        _graph = self.graph
+        GeneralUtils.validateAttributes(_graph, ['pos'])
+        k = TorchUtils.validateKNNEdgeIndex(edge_index)
+        _pos = _graph.pos
+        
+        i, j = edge_index[0].view(-1, k), edge_index[1].view(-1, k)
+        vj = _pos[j]
+        v_center = vj.mean(dim=1)
+        dvjc = vj - v_center[i]
+        vt_dvjc = (dvjc[:, :, None] * dvjc[..., None]).sum(dim=1)
+        _, eigvec = torch_linalg_eigh(vt_dvjc)
+        return eigvec
+    
+    def getPVTDecomposition(self, edge_index: torch_Tensor) -> None:
+        _graph = self.graph
+        GeneralUtils.validateAttributes(_graph, ['pos'])
+        TorchUtils.validateEdgeIndex(edge_index)
+        _pos = _graph.pos
+        
+        i, j = edge_index
+        vj = _pos[j]
+        v_center = torch_zeros((_graph.num_nodes, 3), dtype=vj.dtype, device=vj.device) \
+            .index_add_(dim=0, index=i, source=vj)
+        dvjc = vj - v_center[i]
+        vt_dvjc = (dvjc[:, None] * dvjc[..., None]).sum(dim=1)
+        _, eigvec = torch_linalg_eigh(vt_dvjc)
+        return eigvec
+    
+    def flipNormals(self) -> None:
+        self.calculateEdgeCost()
+        mst, _ = self.calculateUndirectedMST()
+        self.flipNormalsWithMST(mst)
 
     def calculateEdgeCost(self) -> None:
         r"""
@@ -137,7 +164,7 @@ class GraphBuilder:
         edge_indices = included_edges.nonzero().squeeze()
         return tg_utils_to_undirected(edge_index=_edge_index[:, edge_indices], edge_attr=_edge_attr[edge_indices], num_nodes=N)
 
-    def flipNormals(self, mst_edge_index: torch_Tensor) -> None:
+    def flipNormalsWithMST(self, mst_edge_index: torch_Tensor) -> None:
         r"""
         Flips normals in the graph based on the MST.
 

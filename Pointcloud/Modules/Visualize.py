@@ -16,6 +16,7 @@ from numpy import (
     zeros as np_zeros
 )
 from torch import (
+    cat as torch_cat,
     einsum as torch_einsum,
     linspace as torch_linspace,
     meshgrid as torch_meshgrid,
@@ -30,7 +31,9 @@ from torch.linalg import (
 from torch.nn.functional import normalize as torch_nn_functional_normalize
 from torch_geometric.data import Data as tg_data_Data
 from typing import (
-    Callable as typing_Callable
+    Callable as typing_Callable,
+    Union as typing_Union,
+    Tuple as typing_Tuple
 )
 
 def visualize(vs, es):
@@ -158,7 +161,53 @@ def visSample(data: tg_data_Data):
     _edge_index = data.edge_index
     _n = _x[:, 3:6]
     _y = data.y
+
+    center_dist = (_pos - _pos.mean(dim=0)).norm(dim=1)
+    _pos0 = _pos[center_dist.min(dim=0).indices]
+    mean_dist = center_dist.mean()
+    _scale = mean_dist * 0.1
+
     plot = mp_plot(_pos.numpy())
     plot.add_lines(_pos[_edge_index[0]].numpy(), _pos[_edge_index[1]].numpy())
-    plot.add_lines(_pos.numpy(), (_pos + _n).numpy())
-    plot.add_lines(_pos[0].numpy(), (_pos[0] + _y).numpy())
+    plot.add_lines(_pos.numpy(), (_pos + _n * _scale).numpy(), shading={"line_color": "blue"})
+    plot.add_lines(_pos0.numpy(), (_pos0 + _y * mean_dist).squeeze().numpy(), shading={"line_color": "green"})
+    return plot
+
+def visGraph(data: tg_data_Data):
+    assert hasattr(data, "pos") and data.pos is not None
+    assert hasattr(data, "edge_index") and data.edge_index is not None
+
+    _pos = data.pos
+    _edge_index = data.edge_index
+
+    mean_dist = (_pos - _pos.mean(dim=0)).norm(dim=1).mean()
+    _scale = mean_dist * 0.1
+
+    plot = mp_plot(_pos.numpy())
+    plot.add_lines(_pos[_edge_index[0]].numpy(), _pos[_edge_index[1]].numpy())
+    
+    if hasattr(data, "n") and data.n is not None:
+        _n = data.n
+        plot.add_lines(_pos.numpy(), (_pos + _n * _scale).numpy(), shading={"line_color": "blue"})
+    return plot
+
+def visGraphs(database: typing_Tuple[tg_data_Data]):
+    for data in database:
+        assert hasattr(data, "pos") and data.pos is not None
+        assert hasattr(data, "edge_index") and data.edge_index is not None
+
+    colors = ["red", "blue", "green", "cyan", "yellow", "orange", "magenta"]
+    global_pos = torch_cat([data.pos for data in database], dim=0)
+    global_graph_radius = (global_pos - global_pos.mean(dim=0, keepdim=True)).norm(dim=1).max()
+    plot = mp_plot(global_pos.numpy(), shading={"point_size": global_graph_radius * 0.1})
+
+    for i, data in enumerate(database):
+        _pos = data.pos
+        _edge_index = data.edge_index
+        mean_dist = (_pos - _pos.mean(dim=0)).norm(dim=1).mean()
+        _scale = mean_dist * 0.1
+        plot.add_lines(_pos[_edge_index[0]].numpy(), _pos[_edge_index[1]].numpy(), shading={"line_color": colors[i % len(colors)]})
+        if hasattr(data, "n") and data.n is not None:
+            _n = data.n
+            plot.add_lines(_pos.numpy(), (_pos + _n * _scale).numpy(), shading={"line_color": colors[(i + 3) % len(colors)]})
+    return plot

@@ -1,25 +1,14 @@
-from .Object import Pointcloud
-
-from copy import deepcopy
-from igl import per_vertex_normals as igl_per_vertex_normals, read_obj as igl_read_obj, write_obj as igl_write_obj
-from numpy import arange as np_arange, average as np_average, einsum as np_einsum, load as np_load, ones as np_ones, nan_to_num as np_nan_to_num, repeat as np_repeat, save as np_save, vstack as np_vstack
-from numpy.linalg import norm as np_linalg_norm
-from numpy.random import choice as np_random_choice, normal as np_random_normal
 from pathlib import Path
 
 from torch import (
     float as torch_float,
     full as torch_full,
     load as torch_load,
-    long as torch_long,
     normal as torch_normal,
     randperm as torch_randperm,
     save as torch_save,
     Tensor as torch_Tensor,
     zeros as torch_zeros
-)
-from torch.nn.functional import (
-    normalize as torch_nn_functional_normalize    
 )
 from torch_geometric.data import (
     Data as tg_data_Data
@@ -41,7 +30,7 @@ class Noise:
     # noise_level is a number representing the intensity of the noise.
     # noise_type is 0 for Gaussian and 1 for Impulsive noise.
     # noise_direction is 0 for Vertex Normal direction and 1 for a Random direction.
-    def generateNoise(self, noise_level: typing_Union[int, float], noise_type: int=0, noise_direction: int=0):
+    def generateNoise(self, noise_level: typing_Union[int, float], mean_edge_length: float, noise_type: int=0, noise_direction: int=0, keepNormals: bool = False):
         in_range = lambda input, start, end: (input - (end - start)*0.5)**2
         if in_range(noise_level, 0, 1) > in_range(0, 0, 1):
             raise ValueError(f"noise_level is {noise_level}, but should be a positive number!")
@@ -58,17 +47,16 @@ class Noise:
         _gt, _ = self.getGT()
         _num_nodes = _graph.num_nodes
         _num_nodes_size = (_num_nodes, 3)
-        _edge_index = _graph.edge_index
-        _device = _edge_index.device
-        avg_edge_length = (_gt[_edge_index[1]] - _gt[_edge_index[0]]).norm(dim=1).mean(dim=0)
-        standard_deviation = avg_edge_length * noise_level
+        _device = _gt.device
+
+        standard_deviation = mean_edge_length * noise_level
         random_numbers = torch_normal(torch_zeros(_num_nodes_size, device=_device, dtype=torch_float), torch_full(_num_nodes_size, standard_deviation, device=_device, dtype=torch_float))
         random_offset = random_numbers if noise_direction == 1 else _graph.n * random_numbers[:, 0, None]
         if noise_type == 1:
             _random_indices = torch_randperm(_num_nodes)[:int(_num_nodes*(1 - noise_level))]
             random_offset[_random_indices] = 0
 
-        self.setNoise(_gt + random_offset)
+        self.setNoise(_gt + random_offset, keepNormals)
     
     def getGT(self):
         _graph = self.graph
@@ -76,7 +64,7 @@ class Noise:
         _normal = _graph.gt_n if hasattr(_graph, "gt_n") else _graph.n
         return _pos, _normal
 
-    def setNoise(self, noise: torch_Tensor):
+    def setNoise(self, noise: torch_Tensor, keepNormals: bool = False):
         _graph = self.graph
 
         # Save ground truth if non exists yet
@@ -86,7 +74,8 @@ class Noise:
         _graph.pos = noise
 
         # Remove normals, because they do not match with positions anymore
-        delattr(_graph, "n")
+        if not keepNormals:
+            delattr(_graph, "n")
 
     def resetNoise(self):
         _object = self.graph

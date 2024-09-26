@@ -125,6 +125,7 @@ class Patch2NormalModel(pl_LightningModule):
         x_cat = torch_zeros(x.size(0), pool_sizes[-1], device=_device)
         for i in range(config.HIDDEN.size(0)):
             layer = getattr(self, f"layer{i}")
+            # print(f"Layer: {layer}\nInput size: {x.size()}\nBatch size: {batch.size()}\n unique batches: {batch.unique()}")
             if i < config.NUM_EDGECONV:
                 x = layer(x, edge_index)
                 x_cat[:, pool_sizes[i]:pool_sizes[i+1]] = x

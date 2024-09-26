@@ -1,8 +1,6 @@
 #https://stackoverflow.com/questions/33533148/how-do-i-type-hint-a-method-with-the-type-of-the-enclosing-class
 from __future__ import annotations
 
-from isort import file
-
 from .Utils import TorchUtils
 
 from copy import deepcopy
@@ -27,7 +25,6 @@ from numpy import (
     zeros as np_zeros
 )
 from pathlib import Path
-from pywavefront import Wavefront as pyWavefront
 #https://github.com/nmwsharp/robust-laplacians-py
 from robust_laplacian import point_cloud_laplacian
 from scipy.spatial import KDTree as scipy_spatial_KDTree
@@ -39,6 +36,7 @@ from torch import (
     Tensor as torch_Tensor
 )
 from torch_geometric.data import Data as tg_data_Data
+from torch_geometric.transforms import SamplePoints as tg_transforms_SamplePoints
 
 class Pointcloud:
 
@@ -85,6 +83,30 @@ class Pointcloud:
             pointcloud = Pointcloud(v, n) 
         else:
             pointcloud = Pointcloud(v)
+        pointcloud.file_path = file_path
+        return pointcloud
+    
+    @classmethod
+    def sampleObj(cls, file_path: str, num_points: int, device='cpu') -> Pointcloud:
+        r"""
+        Load an obj file and sample points from the mesh.
+        """
+        path = Path(file_path)
+        assert path.is_file()
+        assert path.suffix == ".obj"
+
+        v, _, n, fv, _, fn = igl_read_obj(file_path)
+        v, n, fv, fn = torch_tensor(v, dtype=torch_float, device=device), torch_tensor(n, dtype=torch_float, device=device), torch_tensor(fv, dtype=torch_long, device=device), torch_tensor(fn, dtype=torch_long, device=device)
+
+        assert v.size(1) == 3
+        assert fv.size(1) == 3
+
+        data = tg_data_Data(pos=v, face=fv.T)
+        new_pointcloud = tg_transforms_SamplePoints(
+            num=num_points,
+            include_normals=True
+        )(data)
+        pointcloud = Pointcloud(new_pointcloud.pos, new_pointcloud.normal)
         pointcloud.file_path = file_path
         return pointcloud
     

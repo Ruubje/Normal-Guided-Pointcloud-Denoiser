@@ -23,18 +23,25 @@ from sklearn.preprocessing import normalize as sklearn_preprocessing_normalize
 from torch import (
     arange as torch_arange,
     bool as torch_bool,
+    cat as torch_cat,
     float as torch_float,
     from_numpy as torch_from_numpy,
     long as torch_long,
+    ones as torch_ones,
     repeat_interleave as torch_repeat_interleave,
     stack as torch_stack,
     Tensor as torch_Tensor,
     zeros as torch_zeros,
     zeros_like as torch_zeros_like
 )
-import torch.cuda as torch_cuda
 from torch.nn.functional import (
     normalize as t_nn_f_normalize
+)
+from torch_geometric.data import (
+    Data as tg_data_Data
+)
+from torch_geometric.nn.pool import (
+    knn as tg_nn_pool_knn
 )
 from typing import (
     Any as typing_Any,
@@ -129,7 +136,7 @@ class SlicedTorchData:
         return self.slices.size(0) - 1
     
     def __getitem__(self, key: int):
-        assert key >= 0 and key < len(self)
+        assert key >= 0 and key <= len(self)
         _slices = self.slices
         return self.data[_slices[key]:_slices[key+1]]
     
@@ -148,17 +155,28 @@ class SlicedTorchData:
     def _assertSlices(self, _slices: torch_Tensor):
         assert _slices.dim() == 1
         assert not _slices.is_floating_point()
-        assert _slices[0] == 0
+        assert _slices[0] == 0, f"Slider start: {_slices[0]}"
         if hasattr(self, "data"):
             assert self.data.size(0) == _slices[-1], f"Data size: {self.data.size(0)}\nSlices last entry: {_slices[-1]}"
     
-    def _batchIndices(self) -> torch_Tensor:
+    def _batchIndices(self, indices: torch_Tensor = None) -> torch_Tensor:
         _slices = self.slices
         assert _slices.dim() == 1, "slices must have 2 dimensions"
         assert not _slices.is_floating_point(), "slices must contain integers"
         assert _slices is not None, "slices cannot be None"
 
-        return torch_repeat_interleave(torch_arange(_slices.size(0) - 1, device=_slices.device), _slices[1:] - _slices[:-1])
+        starts = _slices[:-1]
+        ends = _slices[1:]
+        lengths = ends - starts
+        if indices is None:
+            indices = torch_arange(lengths.size(0), dtype=torch_long, device=_slices.device)
+            repeat_indices = indices
+        else:
+            TorchUtils.validateIndices(indices)
+            repeat_indices = torch_arange(indices.size(0), dtype=torch_long, device=_slices.device)
+        i = torch_repeat_interleave(repeat_indices, lengths[indices])
+        j = self.data[TorchUtils.rangeBoundariesToIndices(starts[indices], ends[indices])]
+        return i, j
     
     def scatterReduce(self, reduction: str) -> torch_Tensor:
         assert reduction in ("sum", "prod", "mean", "amax", "amin")
@@ -167,7 +185,7 @@ class SlicedTorchData:
         means = torch_zeros(len(self), dtype=torch_float, device=_data.device) \
             .scatter_reduce_(
                 dim=0, 
-                index=self._batchIndices(), 
+                index=self._batchIndices()[0], 
                 src=_data.to(torch_float), 
                 reduce=reduction
             )
@@ -192,6 +210,17 @@ class TorchUtils:
         assert _edge_index.dim() == 2, f"_edge_index dimensions: {_edge_index.dim()}"
         assert _edge_index.size(0) == 2, f"_edge_index first dimension: {_edge_index.size(0)}"
 
+    r"""
+    Asserts edge index to have a unique count per node.
+    This is equal to k and is also returned
+    """
+    @classmethod
+    def validateKNNEdgeIndex(cls, _edge_index: torch_Tensor) -> None:
+        cls.validateEdgeIndex(_edge_index)
+        unique_node_counts = _edge_index[0].unique(return_counts=True)[1].unique()
+        assert unique_node_counts.size(0) == 1
+        return unique_node_counts[0]
+
     @classmethod
     def face2vertexNormals(cls, v: torch_Tensor, fv: torch_Tensor, n: torch_Tensor, fn: torch_Tensor) -> torch_Tensor:
         r"""
@@ -213,13 +242,89 @@ class TorchUtils:
         assert mask is not None, "Mask cannot be None"
 
         N1, N2 = mask.size(0), mask.size(1)
-        idxs = mask.view(-1).nonzero().squeeze()
-        data = idxs.remainder(N1)
+        idxs = mask.view(-1).nonzero().squeeze(1)
+        data = idxs.remainder(N2)
         slices = torch_zeros(N1 + 1, dtype=torch_long, device=mask.device)
-        u_idx, count = (idxs / N2).floor_().long().unique(return_counts=True)
+        u_idx, count = idxs.div_(N2, rounding_mode="floor").unique(return_counts=True)
         slices[u_idx + 1] = count
         slices = slices.cumsum_(dim=0)
         return SlicedTorchData(data, slices)
+    
+    @classmethod
+    def ChamferDistance(cls, pos0: torch_Tensor, pos1: torch_Tensor) -> float:
+        assert pos0.dim() == 2
+        assert pos1.dim() == 2
+        assert pos0.size(1) == 3
+        assert pos1.size(1) == 3
+
+        knn0 = tg_nn_pool_knn(pos0, pos1, 1)
+        knn1 = tg_nn_pool_knn(pos1, pos0, 1)
+        chamfer0 = (pos0[knn0[1]] - pos1[knn0[0]]).square().sum(dim=1)
+        chamfer1 = (pos1[knn1[1]] - pos0[knn1[0]]).square().sum(dim=1)
+        
+        return torch_cat([chamfer0, chamfer1], dim=0)
+    
+    @classmethod
+    def HausdorffDistance(cls, pos0: torch_Tensor, pos1: torch_Tensor) -> float:
+        assert pos0.dim() == 2
+        assert pos1.dim() == 2
+        assert pos0.size(1) == 3
+        assert pos1.size(1) == 3
+
+        knn0 = tg_nn_pool_knn(pos0, pos1, 1)
+        knn1 = tg_nn_pool_knn(pos1, pos0, 1)
+        chamfer0 = (pos0[knn0[1]] - pos1[knn0[0]]).norm(dim=1)
+        chamfer1 = (pos1[knn1[1]] - pos0[knn1[0]]).norm(dim=1)
+        
+        return torch_cat([chamfer0, chamfer1], dim=0)
+    
+    @classmethod
+    def PaperDistance(cls, gt: torch_Tensor, noisy: torch_Tensor) -> float:
+        r'''
+            Normalize Average Hausdorff Distance according to the paper
+        '''
+        assert gt.dim() == 2
+        assert noisy.dim() == 2
+        assert gt.size(1) == 3
+        assert noisy.size(1) == 3
+
+        bounding_box_diagonal = (gt.max(dim=0).values - gt.min(dim=0).values).norm(dim=0)
+        knn = tg_nn_pool_knn(gt, noisy, 1)
+        hausdorff = (gt[knn[1]] - noisy[knn[0]]).norm(dim=1) / bounding_box_diagonal
+        
+        return hausdorff
+
+    @classmethod
+    def averageEdgeLength(cls, pos: torch_Tensor, edge_index: torch_Tensor):
+        return (pos[edge_index[1]] - pos[edge_index[0]]).norm(dim=1).mean(dim=0)
+    
+    @classmethod
+    def pointcloudRadius(cls, pos: torch_Tensor):
+        return (pos - pos.mean(dim=0, keepdim=True)).norm(dim=1).max(dim=0).values
+
+    @classmethod
+    # https://stackoverflow.com/questions/47125697/concatenate-range-arrays-given-start-stop-numbers-in-a-vectorized-way-numpy
+    # starts: 1D torch tensor of indices of size n representing the starts of the ranges.
+    # ends: 1D torch tensor of indices of size n representing the ends of the ranges.
+    # return: 1D torch tensor of indices with indices that are within one of the given ranges.
+    # WARNING: The list can be unsorted and contain duplicates.
+    def rangeBoundariesToIndices(cls, starts: torch_Tensor, ends: torch_Tensor) -> torch_Tensor:
+        assert starts.dtype == torch_long
+        l = ends - starts
+        nonsense_ids = l <= 0
+        if nonsense_ids.any():
+            # Lengths of ranges that are zero are nonsense and should be ignored.
+            # Ranges with a negative length have the start and end reversed.
+            #   This should be fixed before calling this function for efficiency.
+            warn(f"Nonsensible ranges are given and will be ignored! (IDs: {nonsense_ids.nonzero().flatten()}, Range lengths: {l[nonsense_ids]})")
+            starts = starts[~nonsense_ids]
+            ends = ends[~nonsense_ids]
+            l = ends - starts
+        clens = l.cumsum_(dim=0)
+        ids = torch_ones(clens[-1],dtype=torch_long)
+        ids[0] = starts[0]
+        ids[clens[:-1]] = starts[1:] - ends[:-1] + 1
+        return ids.cumsum(dim=0)
     
 class DeprecatedUtils:
 
