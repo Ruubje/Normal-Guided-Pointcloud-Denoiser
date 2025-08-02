@@ -24,13 +24,16 @@ from torch import (
     arange as torch_arange,
     bool as torch_bool,
     cat as torch_cat,
+    einsum as torch_einsum,
     float as torch_float,
     from_numpy as torch_from_numpy,
     long as torch_long,
     ones as torch_ones,
     repeat_interleave as torch_repeat_interleave,
     stack as torch_stack,
+    tensor as torch_tensor,
     Tensor as torch_Tensor,
+    unique as torch_unique,
     zeros as torch_zeros,
     zeros_like as torch_zeros_like
 )
@@ -42,6 +45,9 @@ from torch_geometric.data import (
 )
 from torch_geometric.nn.pool import (
     knn as tg_nn_pool_knn
+)
+from torch_scatter import (
+    scatter_mean as torch_scatter_mean
 )
 from typing import (
     Any as typing_Any,
@@ -178,17 +184,13 @@ class SlicedTorchData:
         j = self.data[TorchUtils.rangeBoundariesToIndices(starts[indices], ends[indices])]
         return i, j
     
-    def scatterReduce(self, reduction: str) -> torch_Tensor:
-        assert reduction in ("sum", "prod", "mean", "amax", "amin")
-
+    def scatterMean(self) -> torch_Tensor:
         _data = self.data
-        means = torch_zeros(len(self), dtype=torch_float, device=_data.device) \
-            .scatter_reduce_(
-                dim=0, 
-                index=self._batchIndices()[0], 
-                src=_data.to(torch_float), 
-                reduce=reduction
-            )
+        means = torch_scatter_mean(
+            src=_data.to(torch_float), 
+            index=self._batchIndices()[0], 
+            dim=0
+        )
         return means
 
 class TorchUtils:
@@ -236,6 +238,48 @@ class TorchUtils:
         return t_nn_f_normalize(vn, dim=-1)
     
     @classmethod
+    def edge_to_faces(cls, edge_index):
+        """
+        Convert edges (2, E) to triangular faces (3, F).
+        
+        Args:
+            edge_index (torch.Tensor): Tensor of shape (2, E) representing edges.
+            
+        Returns:
+            torch.Tensor: Tensor of shape (3, F) representing triangular faces.
+        """
+        # Create adjacency list from edges
+        edges = edge_index.t()  # Shape: (E, 2)
+        adjacency_dict = {}
+        for edge in edges:
+            u, v = edge.tolist()
+            if u not in adjacency_dict:
+                adjacency_dict[u] = set()
+            if v not in adjacency_dict:
+                adjacency_dict[v] = set()
+            adjacency_dict[u].add(v)
+            adjacency_dict[v].add(u)
+
+        # Find triangular faces
+        faces = []
+        for u in adjacency_dict:
+            neighbors = list(adjacency_dict[u])
+            for i in range(len(neighbors)):
+                for j in range(i + 1, len(neighbors)):
+                    v, w = neighbors[i], neighbors[j]
+                    # Check if the triangle (u, v, w) is valid (i.e., edge v-w exists)
+                    if v in adjacency_dict and w in adjacency_dict[v]:
+                        # Sort vertices to avoid duplicate triangles
+                        triangle = sorted([u, v, w])
+                        faces.append(triangle)
+
+        # Remove duplicate faces
+        faces = torch_unique(torch_tensor(faces, dtype=torch_long), dim=0)
+
+        # Transpose to match (F, 3) format
+        return faces
+    
+    @classmethod
     def maskToSlicedTorchData(cls, mask: torch_Tensor) -> torch_Tensor:
         assert mask.dim() == 2, "mask must have 2 dimensions"
         assert mask.dtype == torch_bool, "Mask must contain booleans"
@@ -252,17 +296,39 @@ class TorchUtils:
     
     @classmethod
     def ChamferDistance(cls, pos0: torch_Tensor, pos1: torch_Tensor) -> float:
+        r'''
+            Calculates the distance between the closest point in pos0 to a point in pos1 and visa versa.
+        '''
         assert pos0.dim() == 2
         assert pos1.dim() == 2
         assert pos0.size(1) == 3
         assert pos1.size(1) == 3
 
+        pos = torch_cat([pos0, pos1], dim=0)
+        d = 2 * (pos - pos.mean(dim=0, keepdim=True)).norm(dim=1).max(dim=0).values
         knn0 = tg_nn_pool_knn(pos0, pos1, 1)
         knn1 = tg_nn_pool_knn(pos1, pos0, 1)
-        chamfer0 = (pos0[knn0[1]] - pos1[knn0[0]]).square().sum(dim=1)
-        chamfer1 = (pos1[knn1[1]] - pos0[knn1[0]]).square().sum(dim=1)
+        chamfer0 = ((pos0[knn0[1]] - pos1[knn0[0]]) / d).square().sum(dim=1)
+        chamfer1 = ((pos1[knn1[1]] - pos0[knn1[0]]) / d).square().sum(dim=1)
         
         return torch_cat([chamfer0, chamfer1], dim=0)
+    
+    @classmethod
+    def SingleChamferDistance(cls, pos0: torch_Tensor, pos1: torch_Tensor) -> float:
+        r'''
+            Calculates the distance between the closest point in pos0 to a point in pos1 and visa versa.
+        '''
+        assert pos0.dim() == 2
+        assert pos1.dim() == 2
+        assert pos0.size(1) == 3
+        assert pos1.size(1) == 3
+
+        pos = torch_cat([pos0, pos1], dim=0)
+        d = 2 * (pos - pos.mean(dim=0, keepdim=True)).norm(dim=1).max(dim=0).values
+        knn0 = tg_nn_pool_knn(pos0, pos1, 1)
+        chamfer0 = ((pos0[knn0[1]] - pos1[knn0[0]]) / d).square().sum(dim=1)
+        
+        return chamfer0
     
     @classmethod
     def HausdorffDistance(cls, pos0: torch_Tensor, pos1: torch_Tensor) -> float:
@@ -271,17 +337,21 @@ class TorchUtils:
         assert pos0.size(1) == 3
         assert pos1.size(1) == 3
 
+        pos = torch_cat([pos0, pos1], dim=0)
+        diameter = 2 * (pos - pos.mean(dim=0, keepdim=True)).norm(dim=1).max(dim=0).values
+
         knn0 = tg_nn_pool_knn(pos0, pos1, 1)
         knn1 = tg_nn_pool_knn(pos1, pos0, 1)
-        chamfer0 = (pos0[knn0[1]] - pos1[knn0[0]]).norm(dim=1)
-        chamfer1 = (pos1[knn1[1]] - pos0[knn1[0]]).norm(dim=1)
+        chamfer0 = (pos0[knn0[1]] - pos1[knn0[0]]).norm(dim=1) / diameter
+        chamfer1 = (pos1[knn1[1]] - pos0[knn1[0]]).norm(dim=1) / diameter
         
         return torch_cat([chamfer0, chamfer1], dim=0)
     
     @classmethod
     def PaperDistance(cls, gt: torch_Tensor, noisy: torch_Tensor) -> float:
         r'''
-            Normalize Average Hausdorff Distance according to the paper
+            Normalize Average Hausdorff Distance according to the paper.
+            Actually uses the one sided Chamfer distance and scales towards bounding box.
         '''
         assert gt.dim() == 2
         assert noisy.dim() == 2
@@ -316,7 +386,8 @@ class TorchUtils:
             # Lengths of ranges that are zero are nonsense and should be ignored.
             # Ranges with a negative length have the start and end reversed.
             #   This should be fixed before calling this function for efficiency.
-            warn(f"Nonsensible ranges are given and will be ignored! (IDs: {nonsense_ids.nonzero().flatten()}, Range lengths: {l[nonsense_ids]})")
+            if (l[nonsense_ids] < 0).any():
+                warn(f"Nonsensible ranges are given and will be ignored! (IDs: {nonsense_ids.nonzero().flatten()}, Range lengths: {l[nonsense_ids]})")
             starts = starts[~nonsense_ids]
             ends = ends[~nonsense_ids]
             l = ends - starts
@@ -325,6 +396,15 @@ class TorchUtils:
         ids[0] = starts[0]
         ids[clens[:-1]] = starts[1:] - ends[:-1] + 1
         return ids.cumsum(dim=0)
+
+    @classmethod
+    def applyRInv(cls, R_inv: torch_Tensor, other: torch_Tensor) -> torch_Tensor:
+        len_other_shape = other.dim()
+        if R_inv.dim() == 3 and R_inv.size(0) == other.size(0):
+            if len_other_shape == 2:
+                return torch_einsum("ni,nij->nj", other, R_inv)
+        else:
+            raise ValueError(f"Input arrays were not of the correct shape")
     
 class DeprecatedUtils:
 
