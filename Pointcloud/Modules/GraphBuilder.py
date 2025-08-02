@@ -1,9 +1,10 @@
 from .Object import Pointcloud
-from .Utils import GeneralUtils, TorchUtils
+from .Selector import Selection
+from .Utils import GeneralUtils, TorchUtils, SlicedTorchData
 
-from deltaconv.geometry import (
-    estimate_basis as dc_geo_estimate_basis
-)
+# from deltaconv.geometry import (
+#     estimate_basis as dc_geo_estimate_basis
+# )
 from math import (
     cos as math_cos,
     pi as math_pi
@@ -22,11 +23,13 @@ from torch import (
     zeros as torch_zeros
 )
 from torch.linalg import (
-    eigh as torch_linalg_eigh,
-    svd as torch_linalg_svd
+    eigh as torch_linalg_eigh
 )
 from torch_cluster import (
     knn_graph as tc_knn_graph
+)
+from torch_scatter import(
+    scatter_mean as torch_scatter_mean
 )
 from torch_geometric.data import Data as tg_data_Data
 from torch_geometric.utils import (
@@ -66,6 +69,11 @@ class GraphBuilder:
         return torch_from_numpy(np_vstack((Lcoo.row, Lcoo.col))).long().to(_device),\
                                                     torch_from_numpy(M.data).float().to(_device)
 
+    def getRobustLaplacianFaces(self) -> torch_Tensor:
+        edge_index = self.getLaplacianEdgeIndex()[0]
+        edge_index = edge_index[:, edge_index[0] != edge_index[1]]
+        return TorchUtils.edge_to_faces(edge_index)
+
     def setAndFlipNormals(self, flip: bool = True) -> None:
         _graph = self.graph
         GeneralUtils.validateAttributes(_graph, ["edge_index"])
@@ -102,18 +110,19 @@ class GraphBuilder:
         _, eigvec = torch_linalg_eigh(vt_dvjc)
         return eigvec
     
-    def getPVTDecomposition(self, edge_index: torch_Tensor) -> None:
+    def getPVTDecomposition(self, selection: Selection) -> None:
         _graph = self.graph
         GeneralUtils.validateAttributes(_graph, ['pos'])
-        TorchUtils.validateEdgeIndex(edge_index)
         _pos = _graph.pos
+        N = _graph.num_nodes
         
-        i, j = edge_index
+        i, j = selection.getEdgeIndex()
         vj = _pos[j]
-        v_center = torch_zeros((_graph.num_nodes, 3), dtype=vj.dtype, device=vj.device) \
-            .index_add_(dim=0, index=i, source=vj)
+        v_center = torch_scatter_mean(src=vj, index=i, dim=0)
         dvjc = vj - v_center[i]
-        vt_dvjc = (dvjc[:, None] * dvjc[..., None]).sum(dim=1)
+        dvjc_o = dvjc[:, None] * dvjc[..., None]
+        vt_dvjc =  torch_zeros((N, 3, 3), dtype=dvjc_o.dtype, device=dvjc_o.device) \
+            .index_add_(dim=0, index=i, source=dvjc_o)
         _, eigvec = torch_linalg_eigh(vt_dvjc)
         return eigvec
     

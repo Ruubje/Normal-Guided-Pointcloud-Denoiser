@@ -1,5 +1,5 @@
-from .Alignor import Alignor
 from .Denoiser import Denoiser
+from .Decompositionor import Decompositionor
 from .GraphBuilder import GraphBuilder
 from .Noise import Noise
 from .Object import Pointcloud
@@ -8,6 +8,7 @@ from .Utils import GeneralUtils, SlicedTorchData, TorchUtils
 
 from torch import (
     cat as torch_cat,
+    pi as torch_pi,
     Tensor as torch_Tensor
 )
 from torch_geometric.data import (
@@ -18,6 +19,7 @@ from torch_geometric.utils import (
     subgraph as tg_utils_subgraph
 )
 from tqdm import tqdm
+from typing import Callable as typing_Callable
 
 class Processor:
     def __init__(self, pointcloud: Pointcloud):
@@ -26,19 +28,16 @@ class Processor:
         _graph = self.graphBuilder.graph
         self.graph = _graph
         self.selector = Selector(_graph)
-        self.alignor = Alignor(_graph)
         self.noise = Noise(_graph)
         self.denoiser = Denoiser(_graph)
+        self.decompositionor = Decompositionor(_graph)
 
     def getMDFeatures(self) -> torch_Tensor:
-        GeneralUtils.validateAttributes(self, ["alignor", "selector"])
-        _alignor = self.alignor
         selection = self.selector.getMDSelection(indices=None)
-        _, _, (eigval, _) = _alignor.getMDTransformation(selection)
-        return _alignor.getMDFeatures(eigval)
+        decomposition, scale_factors = self.decompositionor.getMDTransformation(selection, self.graph.n, self.graph.mass)
+        return decomposition.getMDFeatures()
     
     def getMDPatches(self, indices: torch_Tensor = None):
-        GeneralUtils.validateAttributes(self, ["alignor", "selector"])
         _alignor = self.alignor
 
         N = len(indices) if indices is not None else self.graph.num_nodes
@@ -81,20 +80,120 @@ class Processor:
         y = gt[None] @ R_inv_i
         return tg_data_Data(x=x, edge_index=edge_index, y=y)
     
-    def getVUFeatures(self, k: int = 6, r_scale: float = 4):
+    def getVUDecomposition(self):
         _graph = self.graph
-        _graph.edge_index = self.graphBuilder.getKNNEdgeIndex(k)
+        _graph.edge_index = self.graphBuilder.getKNNEdgeIndex(6)
         _pos = _graph.pos
         _edge_index = _graph.edge_index
         _selector = self.selector
-        _alignor = self.alignor
+        _decompositionor = self.decompositionor
         mean_graph_edge_length = TorchUtils.averageEdgeLength(_pos, _edge_index)
-        r = r_scale * mean_graph_edge_length
+        r = 2 * mean_graph_edge_length
         selection = _selector.getPointsInRangeSelection(r)
-        filtered_normals = _alignor.getVUFilteredNormals(selection)
-        eigval, _ = _alignor.getVUDecomposition(
-            selection, 
-            filtered_normals
+        decompositionNVT = _decompositionor.getNormalFilteredNVT(selection, _graph.n, rho=0.95)
+        filtered_normals = decompositionNVT.getVUSmoothedNormals(_graph.n, tau=0.3, d=3)
+        decompositionPVT = _decompositionor.getNormalFilteredPVT(
+            selection,
+            filtered_normals,
+            rho=0.95
         )
-        features = _alignor.getVUFeatures(eigval, mean_graph_edge_length, k)
-        return features
+        return decompositionPVT
+    
+    def getMartinFeatureDecomposition(self, r: float, rho: float = 0.9):
+        _n = self.graph.n
+        selection = self.selector.getPointsInRangeSelection(r)
+        nvt = self.decompositionor.getNormalFilteredNVT(selection, _n, rho)
+        filtered_normals = nvt.getVUSmoothedNormals(_n)
+        decomposition = self.decompositionor.getNormalFilteredPVT(selection, filtered_normals, rho)
+        return decomposition, filtered_normals
+    
+    def getMyFeatureDecomposition(self, N: int = 2 ** 4, angle: float = None):
+        angle = angle if angle is not None else torch_pi * 5 / 12
+        n = self.graph.n
+        selection = self.selector.getKNNSelection(N)
+        nvt = self.decompositionor.getBetterFilteredNVT(selection, n, angle)
+        filtered_normals = nvt.getVUSmoothedNormals(n)
+        decomposition = self.decompositionor.getBetterFilteredNVT(selection, filtered_normals, angle)
+        return decomposition, filtered_normals
+
+    def denoise(self):
+        l = TorchUtils.averageEdgeLength(self.graph.pos, self.selector.getKNNSelection(6).getEdgeIndex())
+        d = 2 * l
+        alphas = [1, 0.2, 1]
+        for _ in range(2):
+            decomposition, f_n = self.getMyFeatureDecomposition()
+            classes = decomposition.getClasses()
+            selection = self.selector.getKNNSelection(8)
+            for key in range(3):
+                indices = (classes == key).nonzero().flatten()
+                if indices.size(0) == 0:
+                    continue
+                elif key == 0:
+                    new_pos = self.denoiser.flat_step(selection.filter(indices), f_n, d, alphas[key])
+                elif key == 1:
+                    edge_vectors = decomposition.eigvec[..., 0]
+                    new_pos = self.denoiser.edge_step(selection.filter(indices), f_n, edge_vectors, d, alphas[key])
+                else:
+                    new_pos = self.denoiser.feature_step(selection.filter(indices), f_n, d, alphas[key])
+                self.graph.pos[indices] = new_pos
+            self.graph.n = f_n
+
+    def denoiseUntilMinimumError(self, gt_pos: torch_Tensor, strategy: dict, k: int = 7, alpha: list = [0.02, 0.02, 0.1], d: float = 200, error_funcs: list[typing_Callable] = [TorchUtils.PaperDistance]):
+        _graph = self.graph
+        _denoiser = self.denoiser
+        _selector = self.selector
+
+        noisy_graph_pos = _graph.pos.clone()
+        noisy_graph_n = _graph.n.clone()
+
+        # Do iterations
+        i = 0
+        previous_pos = noisy_graph_pos
+        current_pos = previous_pos
+        previous_error = [error_func(gt_pos, _graph.pos) + 200 for error_func in error_funcs]
+        current_error = [error_func(gt_pos, _graph.pos) for error_func in error_funcs]
+        # Initialize tqdm without a total
+        pbar = tqdm(desc="Vertex updating")
+        while current_error[0].mean(dim=0) < previous_error[0].mean(dim=0):
+            decomposition, f_n = self.getMyFeatureDecomposition()
+            edge_vectors = decomposition.eigvec[..., 0]
+            classes = decomposition.getClasses()
+            selection = _selector.getKNNSelection(k)
+            for key, func in strategy.items():
+                indices = (classes == key).nonzero().squeeze_()
+                if indices.size(0) == 0:
+                    continue
+                if func == _denoiser.edge_step:
+                    new_pos = func(selection.filter(indices), f_n, edge_vectors, d, alpha[key])
+                else:
+                    new_pos = func(selection.filter(indices), f_n, d, alpha[key])
+                _graph.pos[indices] = new_pos
+            error = [error_func(gt_pos, _graph.pos) for error_func in error_funcs]
+            previous_error = current_error
+            current_error = error
+            previous_pos = current_pos
+            current_pos = _graph.pos
+            self.graph.n = f_n
+            i += 1
+            pbar.update(1)
+            pbar.set_postfix({"Comparing Error": float(error[0].mean(dim=0))})
+
+        print(f"Stopped cause new error was {current_error[0].mean(dim=0):.2E} compaired to previous error {previous_error[0].mean(dim=0):.2E}")
+        pbar.close()
+        _graph.pos = noisy_graph_pos
+        _graph.n = noisy_graph_n
+        return previous_pos, previous_error, i - 1
+    
+    def preprocessPointcloud(self, k: int = 12, noise_level: float = 0.3):
+        _graph = self.graph
+        _graphBuilder = self.graphBuilder
+
+        _graph.edge_index = _graphBuilder.getKNNEdgeIndex(k)
+        _graphBuilder.setAndFlipNormals(flip=False)
+
+        _pos = _graph.pos
+        _edge_index = _graph.edge_index
+
+        l = TorchUtils.averageEdgeLength(_pos, _edge_index)
+        self.noise.generateNoise(noise_level, l, keepNormals=False)
+        _graphBuilder.setAndFlipNormals(flip=True)

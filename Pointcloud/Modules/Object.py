@@ -24,11 +24,13 @@ from numpy import (
     vstack as np_vstack,
     zeros as np_zeros
 )
+from open3d.io import read_point_cloud as o3d_io_read_point_cloud
 from pathlib import Path
 #https://github.com/nmwsharp/robust-laplacians-py
 from robust_laplacian import point_cloud_laplacian
 from scipy.spatial import KDTree as scipy_spatial_KDTree
 from torch import (
+    as_tensor as torch_as_tensor,
     float as torch_float,
     from_numpy as torch_from_numpy,
     long as torch_long,
@@ -83,6 +85,49 @@ class Pointcloud:
             pointcloud = Pointcloud(v, n) 
         else:
             pointcloud = Pointcloud(v)
+        pointcloud.file_path = file_path
+        return pointcloud
+    
+    @classmethod
+    def loadXYZ(cls, file_path: str, device='cpu') -> Pointcloud:
+        r"""
+        We only implement loading, since saving doesn't work with this library...
+        """
+        path = Path(file_path)
+        assert path.is_file()
+        assert path.suffix == ".xyz" or path.suffix == ".clean_xyz"
+
+        v_list = []
+
+        with open(file_path, 'r') as file:
+
+            for line in file:
+                parts = line.split()
+                x, y, z = map(float, parts)
+                v_list.append([x, y, z])
+
+        v = torch_tensor(v, dtype=torch_float, device=device)
+        # if n.size(0) > 0 and fn.size(0) > 0:
+        #     pointcloud = Pointcloud(v, TorchUtils.face2vertexNormals(v, fv, n, fn))
+        # elif n.size(0) > 0 and v.size(0) == n.size(0):
+        #     pointcloud = Pointcloud(v, n) 
+        # else:
+        pointcloud = Pointcloud(v)
+        pointcloud.file_path = file_path
+        return pointcloud
+    
+    @classmethod
+    def loadPly(cls, file_path: str, device='cpu') -> Pointcloud:
+        r"""
+        We only implement loading, since we don't require saving yet..
+        """
+        path = Path(file_path)
+        assert path.is_file()
+        assert path.suffix == ".ply"
+
+        pcd = o3d_io_read_point_cloud(file_path)
+        v = torch_as_tensor(pcd.points, dtype=torch_float, device=device)
+        pointcloud = Pointcloud(v)
         pointcloud.file_path = file_path
         return pointcloud
     
