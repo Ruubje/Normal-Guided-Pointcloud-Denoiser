@@ -67,8 +67,9 @@ def test():
         val_cos_loss.append(cos_loss.data.item())
         val_value_loss.append(value_loss.data.item())
 
+        # print(f"Expected output: {output}\nGround truth? gt_norm: {gt_norm}")
         print("Val Batch: %d/%d, || cos loss: %.7f, || value loss: %.7f" % \
-                (i_test + 1, k_opt.num_val_batch, cos_loss.data.item(), value_loss.data.item()))
+                (i_test + 1, np.floor(len(data_path) / k_opt.batch_size), cos_loss.data.item(), value_loss.data.item()))
 
 if __name__ == '__main__':
     test()

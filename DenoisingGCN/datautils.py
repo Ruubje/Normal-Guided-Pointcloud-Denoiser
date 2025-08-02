@@ -8,7 +8,7 @@ import h5py
 import torch
 import torch.utils.data as Tdata
 
-from parsers import getParser
+from .parsers import getParser
 
 k_data_path = "./testsamples/"
 k_h5_path = "./testsamples/"
@@ -35,7 +35,7 @@ class MatrixDataset(Tdata.Dataset):
         input_features = source_data["FEA"]
         input_features = np.array(input_features)
         input_features = input_features.T
-
+        
         num_faces = input_matrix.shape[0]
         if(num_faces >= self.num_neighbors):
             input_matrix = input_matrix[0:self.num_neighbors, 0:self.num_neighbors]
@@ -64,19 +64,20 @@ class MatrixDataset(Tdata.Dataset):
             input_indices.append(temp_idx)
 
         input_indices = np.array(input_indices)
-
+        
         gt_norm = source_data["GT"]
         gt_norm = np.array(gt_norm).reshape(-1).astype(np.float32)
 
         center_norm = source_data["NOR"]
         center_norm = np.array(center_norm).reshape(-1).astype(np.float32)
-        
+
+        # print(f"input_matrix: {input_matrix.shape}, input_features: {input_features.shape}, gt_norm: {gt_norm.shape}, center_norm: {center_norm.shape}")
         gt_res = ((np.dot(gt_norm, center_norm) * gt_norm) - center_norm + 1.) / 2.
 
         # gt_norm = (gt_norm + 1.) / 2.
 
         inputs = np.c_[input_features, input_indices]
-
+        # print(f"inputs: {inputs.shape}, gt_res: {gt_res.shape}, gt_norm: {gt_norm.shape}, center_norm: {center_norm.shape}")
         return inputs, gt_res, gt_norm, center_norm
 
     def __getitem__(self, index):
@@ -92,11 +93,15 @@ class MatrixDataset(Tdata.Dataset):
 def preDataPath(folder_list):
     all_file_list = []
     for i in range(len(folder_list)):
-        file_list = os.listdir(k_data_path + folder_list[i])
+        folder_path = k_data_path + folder_list[i]
+        if os.path.isfile(folder_path):
+            print(f"Skipped {folder_path}, because it was a file instead of a folder (model with data)")
+            continue
+        file_list = os.listdir(folder_path)
         for j in range(len(file_list)):
             if(file_list[j][0] == '9'):
                 continue
-            file_list[j] = k_data_path + folder_list[i] + '/' + file_list[j]
+            file_list[j] = folder_path + '/' + file_list[j]
             all_file_list.append(file_list[j])
 
     return all_file_list
