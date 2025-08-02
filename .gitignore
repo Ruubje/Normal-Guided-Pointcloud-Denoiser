@@ -43,17 +43,17 @@
 
 # Folders
 .vs/
-x64/
-TestData/
-DataSet/
-DataGen/
-Results/
+# x64/
+# TestData/
+# DataSet/
+# DataGen/
+# Results/
 runs/
 .vscode/
 __pycache__
-validationRes/
-Results/
-src/
+# validationRes/
+# Results/
+# src/
 
 # Configure files
 *.vcxproj
