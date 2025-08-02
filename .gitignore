@@ -31,15 +31,15 @@
 *.app
 
 # Object files don't need to be stored anymore..
-*.obj
+# *.obj
 *.mtl
 
 # Settings files
 *.ini
 
 # Trained model files
-*.pt
-*.t7
+# *.pt
+# *.t7
 
 # Folders
 .vs/
